@@ -1,0 +1,21 @@
+{
+  "name": "agent-cockpit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @agent-cockpit/server\" \"npm run dev -w @agent-cockpit/web\"",
+    "build": "npm run build -w @agent-cockpit/shared && npm run build -w @agent-cockpit/server && npm run build -w @agent-cockpit/web",
+    "typecheck": "tsc --build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.0.0",
+    "typescript": "^5.7.0"
+  }
+}
