@@ -142,9 +142,23 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
 
   const retry = useCallback(() => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "retry" }));
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Find last user message to optimistically re-append for transcript continuity
+    setMessages((prev) => {
+      const lastUser = [...prev].reverse().find((m) => m.role === "user");
+      if (!lastUser) return prev;
+      return [
+        ...prev,
+        {
+          ...lastUser,
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+        },
+      ];
+    });
+
+    ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
   return { messages, streamingText, status, sendPrompt, stop, retry };

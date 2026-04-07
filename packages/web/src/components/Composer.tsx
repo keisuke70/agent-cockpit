@@ -5,12 +5,14 @@ interface ComposerProps {
   status: SessionStatus | "connecting";
   onSend: (text: string) => void;
   onStop: () => void;
+  onRetry: () => void;
 }
 
-export function Composer({ status, onSend, onStop }: ComposerProps) {
+export function Composer({ status, onSend, onStop, onRetry }: ComposerProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isRunning = status === "running";
+  const isErrorOrStopped = status === "error" || status === "stopped";
   const canSend = text.trim().length > 0 && !isRunning && status !== "connecting";
 
   useEffect(() => {
@@ -51,6 +53,23 @@ export function Composer({ status, onSend, onStop }: ComposerProps) {
         alignItems: "flex-end",
       }}
     >
+      {isErrorOrStopped && (
+        <button
+          onClick={onRetry}
+          style={{
+            minWidth: 44,
+            minHeight: 44,
+            borderRadius: "var(--radius-sm)",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border)",
+            color: "var(--text)",
+            fontWeight: 600,
+            fontSize: 13,
+          }}
+        >
+          Retry
+        </button>
+      )}
       <textarea
         ref={textareaRef}
         value={text}
