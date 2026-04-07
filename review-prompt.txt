@@ -1,0 +1,15 @@
+Review the following implementation plan for the agent-cockpit MVP.
+
+Target plan: docs/plans/2026-04-07-mvp-session-first-cockpit.md
+Related files:
+- README.md (project requirements and constraints)
+- CLAUDE.md (development workflow rules)
+
+Review criteria:
+1. Does the plan align with the project's stated goals in README.md (session-first, prompt-driven, mobile-friendly web cockpit for CLI agents)?
+2. Is the architecture (npm workspaces, Express + WebSocket, React + Vite, SQLite, node-pty) feasible and appropriate for this use case?
+3. Are there any missing MVP requirements from README.md that the plan should cover?
+4. Is the data model (repos, sessions, messages) sufficient for the MVP scope?
+5. Are there implementation risks that aren't addressed?
+6. Is the phasing (scaffold → backend → frontend → integration) logical and incremental?
+7. Are the CLI spawning strategy and PATH handling adequate for the Mac mini + launchd environment?
