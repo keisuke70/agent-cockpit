@@ -1,10 +1,34 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router";
-import type { Repo, Session, AgentType } from "@agent-cockpit/shared";
+import type {
+  Repo,
+  Session,
+  SessionStatus,
+  AgentType,
+} from "@agent-cockpit/shared";
 import { authHeaders } from "../hooks/useAuth.js";
 import { usePushSubscription } from "../hooks/usePushSubscription.js";
-import { RepoAgentSelector } from "../components/RepoAgentSelector.js";
+import { useLobby } from "../hooks/useLobby.js";
+import { RepoAgentSelector, ALL_REPOS } from "../components/RepoAgentSelector.js";
 import { SessionList } from "../components/SessionList.js";
+
+type StatusFilter = "all" | "running" | "idle" | "error";
+
+const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "running", label: "Running" },
+  { id: "idle", label: "Idle" },
+  { id: "error", label: "Error" },
+];
+
+function statusMatchesFilter(
+  status: SessionStatus,
+  filter: StatusFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "idle") return status === "idle" || status === "stopped";
+  return status === filter;
+}
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -16,6 +40,27 @@ export function HomePage() {
   const [repoName, setRepoName] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const push = usePushSubscription();
+  const liveStatuses = useLobby();
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+
+  const isAllRepos = selectedRepoId === ALL_REPOS;
+  const isSpecificRepo = selectedRepoId !== "" && !isAllRepos;
+
+  const repoNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of repos) map.set(r.id, r.name);
+    return map;
+  }, [repos]);
+
+  // effectiveStatus = live status from lobby if available, else the persisted
+  // status from the last fetch. Filtering uses this so the chip filters reflect
+  // reality without needing a refetch every time a session transitions.
+  const filteredSessions = useMemo(() => {
+    return sessions.filter((s) => {
+      const eff: SessionStatus = liveStatuses.get(s.id) ?? s.status;
+      return statusMatchesFilter(eff, statusFilter);
+    });
+  }, [sessions, liveStatuses, statusFilter]);
 
   const fetchRepos = useCallback(async () => {
     const res = await fetch("/api/repos", { headers: authHeaders() });
@@ -28,9 +73,12 @@ export function HomePage() {
 
   const fetchSessions = useCallback(async () => {
     if (!selectedRepoId) return;
-    const res = await fetch(`/api/sessions?repoId=${selectedRepoId}`, { headers: authHeaders() });
+    const url = isAllRepos
+      ? "/api/sessions"
+      : `/api/sessions?repoId=${selectedRepoId}`;
+    const res = await fetch(url, { headers: authHeaders() });
     setSessions(await res.json());
-  }, [selectedRepoId]);
+  }, [selectedRepoId, isAllRepos]);
 
   useEffect(() => {
     fetchRepos();
@@ -41,7 +89,7 @@ export function HomePage() {
   }, [fetchSessions]);
 
   async function createSession() {
-    if (!selectedRepoId) return;
+    if (!isSpecificRepo) return;
     const res = await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -65,7 +113,7 @@ export function HomePage() {
   }
 
   async function deleteSelectedRepo() {
-    if (!selectedRepoId) return;
+    if (!isSpecificRepo) return;
     const repo = repos.find((r) => r.id === selectedRepoId);
     if (!repo) return;
     if (!confirm(`Delete repo "${repo.name}" and all its sessions?`)) return;
@@ -91,7 +139,7 @@ export function HomePage() {
       >
         <h1 style={{ fontSize: 20, fontWeight: 600 }}>Agent Cockpit</h1>
         <div style={{ display: "flex", gap: 4 }}>
-          {selectedRepoId && (
+          {isSpecificRepo && (
             <button
               onClick={deleteSelectedRepo}
               style={{
@@ -163,29 +211,82 @@ export function HomePage() {
         onAgentChange={setSelectedAgent}
       />
 
+      <StatusFilterChips value={statusFilter} onChange={setStatusFilter} />
+
       <div style={{ flex: 1, overflowY: "auto" }}>
-        <SessionList sessions={sessions} />
+        <SessionList
+          sessions={filteredSessions}
+          repoNames={isAllRepos ? repoNames : undefined}
+          liveStatuses={liveStatuses}
+        />
       </div>
 
       <div style={{ padding: "12px 16px", paddingBottom: "calc(12px + var(--safe-bottom))" }} data-section="new-session">
         <button
           onClick={createSession}
-          disabled={!selectedRepoId}
+          disabled={!isSpecificRepo}
           style={{
             width: "100%",
             padding: "12px",
-            background: selectedRepoId ? "var(--accent)" : "var(--bg-surface)",
-            color: selectedRepoId ? "white" : "var(--text-muted)",
+            background: isSpecificRepo ? "var(--accent)" : "var(--bg-surface)",
+            color: isSpecificRepo ? "white" : "var(--text-muted)",
             borderRadius: "var(--radius-sm)",
             fontWeight: 600,
             fontSize: 16,
             minHeight: 48,
           }}
+          title={
+            isAllRepos
+              ? "Pick a specific repo to create a new session"
+              : undefined
+          }
         >
-          New Session
+          {isAllRepos ? "Pick a repo to create a session" : "New Session"}
         </button>
       </div>
     </>
+  );
+}
+
+function StatusFilterChips({
+  value,
+  onChange,
+}: {
+  value: StatusFilter;
+  onChange: (v: StatusFilter) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 6,
+        padding: "0 16px 12px",
+        overflowX: "auto",
+      }}
+    >
+      {STATUS_FILTERS.map((f) => {
+        const active = value === f.id;
+        return (
+          <button
+            key={f.id}
+            onClick={() => onChange(f.id)}
+            style={{
+              padding: "6px 14px",
+              minHeight: 36,
+              borderRadius: 999,
+              border: "1px solid var(--border)",
+              background: active ? "var(--accent)" : "var(--bg-surface)",
+              color: active ? "white" : "var(--text-muted)",
+              fontSize: 13,
+              fontWeight: active ? 600 : 400,
+              flexShrink: 0,
+            }}
+          >
+            {f.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

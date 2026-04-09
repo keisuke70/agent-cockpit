@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router";
 import type { GitStatus } from "@agent-cockpit/shared";
 import { useWebSocket } from "../hooks/useWebSocket.js";
@@ -7,14 +7,19 @@ import { useGitStatus } from "../hooks/useGitStatus.js";
 import { useRepoSessions } from "../hooks/useRepoSessions.js";
 import { useSwipeNavigation } from "../hooks/useSwipeNavigation.js";
 import { StreamOutput } from "../components/StreamOutput.js";
+import { TerminalView } from "../components/TerminalView.js";
 import { Composer } from "../components/Composer.js";
+import { SchedulePanel } from "../components/SchedulePanel.js";
+
+type ViewMode = "chat" | "debug";
 
 export function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const session = useSession(id!);
-  const { messages, streamingText, status, sendPrompt, stop, retry } =
+  const { messages, streamingText, rawStdout, status, sendPrompt, stop, retry } =
     useWebSocket(id!);
+  const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const { status: gitStatus, refresh: refreshGit } = useGitStatus(session?.repoId);
   const repoSessions = useRepoSessions(session?.repoId);
 
@@ -121,14 +126,37 @@ export function SessionPage() {
             {currentIndex + 1}/{totalCount}
           </span>
         )}
+        <button
+          onClick={() => setViewMode(viewMode === "chat" ? "debug" : "chat")}
+          style={{
+            fontSize: 11,
+            padding: "4px 10px",
+            borderRadius: 999,
+            background: viewMode === "debug" ? "var(--accent)" : "var(--bg-surface)",
+            color: viewMode === "debug" ? "white" : "var(--text-muted)",
+            border: "1px solid var(--border)",
+            fontWeight: 600,
+            minHeight: 28,
+          }}
+          aria-label="Toggle Chat / Debug view"
+          title="Toggle Chat / Debug view (live raw stdout, non-replayable)"
+        >
+          {viewMode === "debug" ? "Debug" : "Chat"}
+        </button>
         <StatusDot status={status} />
       </header>
+
+      <SchedulePanel sessionId={id!} />
 
       <div
         style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
         {...swipeHandlers}
       >
-        <StreamOutput messages={messages} streamingText={streamingText} />
+        {viewMode === "chat" ? (
+          <StreamOutput messages={messages} streamingText={streamingText} />
+        ) : (
+          <TerminalView data={rawStdout} />
+        )}
       </div>
       <Composer status={status} onSend={sendPrompt} onStop={stop} onRetry={retry} />
     </>

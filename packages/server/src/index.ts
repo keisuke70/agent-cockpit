@@ -17,9 +17,12 @@ import { getDb, closeDb } from "./db.js";
 import { repoRoutes } from "./routes/repos.js";
 import { sessionRoutes } from "./routes/sessions.js";
 import { pushRoutes } from "./routes/push.js";
+import { scheduleRoutes } from "./routes/schedules.js";
 import { wsRoutes } from "./ws/handler.js";
+import { lobbyRoutes } from "./ws/lobby-handler.js";
 import { cleanupAll } from "./process-manager.js";
 import { initPush } from "./push.js";
+import { initScheduler, stopAllSchedules } from "./scheduler.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -101,11 +104,16 @@ async function main() {
   // Initialize Web Push (loads or generates VAPID keys)
   initPush();
 
+  // Initialize cron scheduler (loads enabled schedules from DB)
+  initScheduler();
+
   // Routes
   await app.register(repoRoutes);
   await app.register(sessionRoutes);
   await app.register(pushRoutes);
+  await app.register(scheduleRoutes);
   await app.register(wsRoutes);
+  await app.register(lobbyRoutes);
 
   // Health check
   app.get("/api/health", () => ({ ok: true }));
@@ -126,6 +134,7 @@ async function main() {
 
   // Graceful shutdown
   const shutdown = () => {
+    stopAllSchedules();
     cleanupAll();
     closeDb();
     logStream.end();

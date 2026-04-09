@@ -4,15 +4,21 @@ import type { Message, SessionStatus, ServerEvent } from "@agent-cockpit/shared"
 interface UseWebSocketResult {
   messages: Message[];
   streamingText: string;
+  /** Live raw stdout buffer for the embedded terminal Debug view. */
+  rawStdout: string;
   status: SessionStatus | "connecting";
   sendPrompt: (text: string) => void;
   stop: () => void;
   retry: () => void;
 }
 
+/** Cap the in-memory raw stdout buffer to keep memory bounded. */
+const RAW_STDOUT_MAX_BYTES = 64 * 1024;
+
 export function useWebSocket(sessionId: string): UseWebSocketResult {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingText, setStreamingText] = useState("");
+  const [rawStdout, setRawStdout] = useState("");
   const [status, setStatus] = useState<SessionStatus | "connecting">("connecting");
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
@@ -90,6 +96,15 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
 
         case "turn_complete":
           break;
+
+        case "raw_stdout":
+          setRawStdout((prev) => {
+            const next = prev + event.data;
+            if (next.length <= RAW_STDOUT_MAX_BYTES) return next;
+            // Truncate from the front, keeping the most recent bytes.
+            return next.slice(next.length - RAW_STDOUT_MAX_BYTES);
+          });
+          break;
       }
     };
 
@@ -111,6 +126,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     lastSeqRef.current = 0;
     setMessages([]);
     setStreamingText("");
+    setRawStdout("");
     setStatus("connecting");
 
     connect();
@@ -174,5 +190,5 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
-  return { messages, streamingText, status, sendPrompt, stop, retry };
+  return { messages, streamingText, rawStdout, status, sendPrompt, stop, retry };
 }

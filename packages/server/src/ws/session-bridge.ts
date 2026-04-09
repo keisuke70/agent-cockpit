@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import type { AgentType, ServerEvent } from "@agent-cockpit/shared";
+import type { AgentType, ServerEvent, SessionStatus } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
@@ -12,6 +12,7 @@ import {
   removeManaged,
   nextSeq,
   broadcastEvent,
+  broadcastLobby,
 } from "../process-manager.js";
 
 /**
@@ -102,7 +103,17 @@ function attachProcessListeners(
 
   let buffer = "";
   handle.proc.stdout.on("data", (chunk: Buffer) => {
-    buffer += chunk.toString();
+    const text = chunk.toString();
+
+    // Forward the raw chunk to listeners as a debug-view event. Excluded
+    // from the eventBuffer in process-manager (live-only).
+    broadcastEvent(managed, {
+      type: "raw_stdout",
+      data: text,
+      seq: nextSeq(managed),
+    });
+
+    buffer += text;
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
 
@@ -186,12 +197,25 @@ function attachProcessListeners(
     } else {
       // Persistent process (claude): closing means the session is done.
       // Remove managed session so a new one is created on next connect.
+      // If a turn was in flight when the persistent process died, also notify
+      // the user — they were probably waiting for output that will never come.
+      const db = getDb();
+      const sess = db
+        .prepare("SELECT status FROM sessions WHERE id = ?")
+        .get(sessionId) as { status: string } | undefined;
+      const wasRunning = sess?.status === "running";
+      if (wasRunning) {
+        stopTurn(sessionId);
+      }
       updateSessionStatus(sessionId, "stopped");
       broadcastEvent(managed, {
         type: "status",
         status: "stopped",
         seq: nextSeq(managed),
       });
+      if (wasRunning) {
+        notifyTurnTerminated(sessionId, "stopped");
+      }
       removeManaged(sessionId);
     }
   });
@@ -242,6 +266,7 @@ export function stopSession(managed: ManagedSession, sessionId: string) {
   updateSessionStatus(sessionId, "stopped");
   const seq = nextSeq(managed);
   broadcastEvent(managed, { type: "status", status: "stopped", seq });
+  notifyTurnTerminated(sessionId, "stopped");
 }
 
 function getNextTurnSeq(sessionId: string): number {
@@ -301,9 +326,12 @@ function failTurn(sessionId: string) {
   ).run(sessionId);
 }
 
-function updateSessionStatus(sessionId: string, status: string) {
+function updateSessionStatus(sessionId: string, status: SessionStatus) {
   const db = getDb();
   db.prepare(
     "UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?",
   ).run(status, sessionId);
+  // Broadcast to lobby listeners (cross-session). This is the single
+  // funnel point for all status transitions in session-bridge.
+  broadcastLobby({ type: "session_status", sessionId, status });
 }

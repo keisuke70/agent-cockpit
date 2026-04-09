@@ -1,5 +1,8 @@
 import type { Repo, AgentType } from "@agent-cockpit/shared";
 
+/** Sentinel value for the "All Repos" cross-repo view. */
+export const ALL_REPOS = "(all)";
+
 interface RepoAgentSelectorProps {
   repos: Repo[];
   selectedRepoId: string;
@@ -23,6 +26,7 @@ export function RepoAgentSelector({
         style={{ flex: 1, minHeight: 44 }}
       >
         <option value="">Select repo...</option>
+        <option value={ALL_REPOS}>All Repos</option>
         {repos.map((r) => (
           <option key={r.id} value={r.id}>
             {r.name}

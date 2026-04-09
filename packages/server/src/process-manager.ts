@@ -1,6 +1,6 @@
 import type { AdapterHandle } from "./adapters/base.js";
 import type { CLIAdapter } from "./adapters/base.js";
-import type { ServerEvent } from "@agent-cockpit/shared";
+import type { LobbyEvent, ServerEvent } from "@agent-cockpit/shared";
 
 export interface ManagedSession {
   sessionId: string;
@@ -12,6 +12,9 @@ export interface ManagedSession {
 }
 
 const sessions = new Map<string, ManagedSession>();
+
+/** Cross-session lobby listeners (one per /ws/lobby connection). */
+const lobbyListeners = new Set<(event: LobbyEvent) => void>();
 
 const EVENT_BUFFER_MAX = 500;
 
@@ -37,9 +40,15 @@ export function nextSeq(managed: ManagedSession): number {
 }
 
 export function broadcastEvent(managed: ManagedSession, event: ServerEvent) {
-  managed.eventBuffer.push(event);
-  if (managed.eventBuffer.length > EVENT_BUFFER_MAX) {
-    managed.eventBuffer.shift();
+  // Raw stdout is high-volume, debug-only, and live-only. Excluded from the
+  // reconnect buffer so it does not blow EVENT_BUFFER_MAX. Reconnect clients
+  // will not see raw stdout that arrived while they were disconnected; they
+  // will only see new raw_stdout events going forward.
+  if (event.type !== "raw_stdout") {
+    managed.eventBuffer.push(event);
+    if (managed.eventBuffer.length > EVENT_BUFFER_MAX) {
+      managed.eventBuffer.shift();
+    }
   }
   for (const listener of managed.listeners) {
     listener(event);
@@ -67,5 +76,21 @@ export function getEventsSince(
 export function cleanupAll() {
   for (const [id] of sessions) {
     removeManaged(id);
+  }
+}
+
+// --- Lobby (cross-session) ---
+
+export function addLobbyListener(fn: (event: LobbyEvent) => void) {
+  lobbyListeners.add(fn);
+}
+
+export function removeLobbyListener(fn: (event: LobbyEvent) => void) {
+  lobbyListeners.delete(fn);
+}
+
+export function broadcastLobby(event: LobbyEvent) {
+  for (const listener of lobbyListeners) {
+    listener(event);
   }
 }

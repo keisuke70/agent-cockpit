@@ -53,6 +53,18 @@ export interface SnapshotEvent {
   status: SessionStatus;
 }
 
+/**
+ * Raw chunk of CLI stdout, forwarded as-is for the embedded terminal Debug
+ * view. Excluded from the eventBuffer (live-only, non-replayable across
+ * reconnects). Carries seq for ordering with other events but reconnect
+ * catch-up will not include it.
+ */
+export interface RawStdoutEvent {
+  type: "raw_stdout";
+  data: string;
+  seq: number;
+}
+
 export type ServerEvent =
   | InitEvent
   | TextDeltaEvent
@@ -61,7 +73,24 @@ export type ServerEvent =
   | TurnCompleteEvent
   | ErrorEvent
   | StatusEvent
+  | RawStdoutEvent
   | SnapshotEvent;
+
+// --- Lobby WebSocket events (cross-session, status-only broadcast) ---
+
+export interface LobbySessionStatusEvent {
+  type: "session_status";
+  sessionId: string;
+  status: SessionStatus;
+}
+
+export interface LobbySnapshotEvent {
+  type: "lobby_snapshot";
+  /** Map of sessionId -> current status for all known managed sessions */
+  statuses: Record<string, SessionStatus>;
+}
+
+export type LobbyEvent = LobbySessionStatusEvent | LobbySnapshotEvent;
 
 // --- Client -> Server messages ---
 

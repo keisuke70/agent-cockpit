@@ -73,18 +73,19 @@
 
 | 機能 | 評価 | 理由 |
 |---|---|---|
-| **Push 通知** | 取り入れる | mobile-first の核心。turn 完了時に通知が飛ばないと結局画面に張り付く必要がある |
-| **スワイプでセッション切替** | 取り入れる | mobile-first を掲げているなら必須級。並列ライブビューと切り離し、「ナビゲーションだけ」を先に入れる |
-| **Git context 表示** | 取り入れる | session header に branch + dirty 状態を出すだけで価値が大きい |
-| **Git Worktree / workspace 管理** | 取り入れる | README で「Repo / Working Directory」をコア概念と宣言しているのに、現状 `cwd` カラムがあるだけで worktree ライフサイクルは無い。並列セッションを安全に走らせるための session-first 基盤として筋が良い |
-| **Gemini adapter** | 取り入れる | adapter 1 個の追加で済む。ただし mobile-first ではないので優先度は中。Gemini CLI 未インストールなのでまず環境整備から |
-| **複数セッション並列ライブビュー** | 取り入れる | 現状は 1 セッション 1 画面。複数 session を同時に live で観察できると体験が大きく変わる。ただし WS 接続数・メモリ・電池の影響が大きく、独立したフェーズで設計が必要 |
-| **スケジューリング (cron / interval)** | 取り入れる | README の「拡張候補」にも明記されている。harness 側に CronCreate などの兆候もある |
-| **Kanban 風タスクボード** | 部分的に取り入れる | フル kanban は session-first 哲学に反するが、「running / waiting / done」の状態フィルタとしての session list 拡張なら筋が良い |
-| **マスターエージェント** | 却下 | "薄いけど使える MVP" を明示的に優先する哲学に反する。Claude Code 自体が orchestration を内包しつつあるので車輪の再発明になる |
-| **埋め込みターミナル (xterm.js)** | 条件付き取り入れ | "secondary terminal mode" として toggle 可能にする。chat ビューを主、terminal を escape hatch にする。**ただし「agent ではない一般 CLI タスクの実行面」までは引き受けない** — それは mosh / 既存ターミナル側の責務として残す |
-| **自動アップデート** | 却下 | 自作 OSS で配布形態が tarball / git pull 想定なので不要 |
-| **versions.json API** | 却下 | 上に同じ |
+| **Push 通知** | ✅ Phase 5 で実装済み | turn 完了/error/stop の 3 経路を踏破。Web Push (VAPID) で配信 |
+| **スワイプでセッション切替** | ✅ Phase 5 で実装済み | single live, navigate via react-router |
+| **Git context 表示** | ✅ Phase 5 で実装済み | session header に branch + dirty バッジ |
+| **複数セッション並列ライブビュー (薄い版)** | Phase 6 で実装中 | Lobby WebSocket で全 session の status 遷移を 1 本の WS で broadcast。N 本接続のフルバージョンは P3 永久後退 |
+| **スケジューリング (cron)** | Phase 6 で実装中 | node-cron + schedules テーブル + scheduler.ts。interval は cron 式で表現するため別モデルにしない |
+| **Kanban 風タスクボード** | Phase 6 で実装中 | フル kanban ではなく状態フィルタ chip (`all / running / idle / error`) として実装 |
+| **横断ビュー (cross-repo session list)** | Phase 6 で実装中 | サーバーは既に対応済み。`All Repos` selector + SessionList row の repo 名表示 |
+| **埋め込みターミナル (debug view)** | Phase 6 で実装中 | xterm.js は使わず `<pre>` で raw JSONL をストリーム表示。chat が主、debug が secondary |
+| **マスターエージェント** | ❌ 恒久却下 | "薄いけど使える MVP" を優先する哲学に反する。Claude Code 自体が orchestration を内包しつつあるので車輪の再発明 |
+| **Git Worktree / workspace 管理** | ❌ 恒久却下 | ユーザーが普段の並列 agent 実行でも worktree を使っていない。フォルダ散乱 / 依存重複 / 切替コストの方が高く、想定する事故 (同じファイルの同時編集) が実運用ではほぼ発生しない |
+| **Gemini adapter** | ❌ 恒久却下 | ユーザーが gemini CLI を使っていない。需要なし |
+| **自動アップデート** | ❌ 恒久却下 | 自作 OSS で配布形態が tarball / git pull 想定なので不要 |
+| **versions.json API** | ❌ 恒久却下 | 上に同じ |
 
 ---
 
@@ -99,91 +100,40 @@
 
 ## 優先度付き機能ロードマップ
 
-### P0: 次の Phase 5 で着手
+### Phase 5 (実装済み, 2026-04-09)
 
-選定基準: 「mobile-first を掲げるなら入っていないと不誠実」かつ「Phase 5 内で独立に shippable」。
+詳細プラン: `docs/plans/2026-04-09-phase5-mobile-resilience.md`
 
-1. **Push 通知 (Web Push)**
-   - 対象: turn 完了 / error / status 変化
-   - サーバー: VAPID 鍵生成 + subscription 保存
-   - フロント: Service Worker 経由で notification 表示
-   - 技術リスク: PWA Web Push は iOS Safari 16.4+ が必要。Android Chrome は問題なし
+「mobile-first を掲げるなら入っていないと不誠実」基準で 4 項目を 1 phase でリリース:
 
-2. **モバイル session スワイプナビゲーション (ナビゲーションだけ)**
-   - 対象: スマホで「ひとつだけ live なセッション」を左右スワイプで隣の session に切り替え
-   - 実装: SessionPage の URL 遷移を swipe gesture でトリガーするだけ。WS は 1 接続のまま、現在見ている session のみ live を維持
-   - 切り出した理由: 「複数 session を同時に live で観察するビュー」は WS 接続数 / メモリ / 電池の設計が大きく重く、Phase 5 で一度に出すには重い。まず「隣 session への移動を片手で速く」だけを Phase 5 で出し、「真の並列ライブビュー」は P1 として独立した phase で扱う
+1. ✅ **Web Push 通知** — turn 完了/error/stop の 3 経路を踏破。VAPID + subscription DB + Service Worker
+2. ✅ **モバイル session スワイプナビ** — single live, react-router navigate
+3. ✅ **Git context 表示** — session header に branch + dirty バッジ (5s polling + turn 完了時 refresh)
+4. ✅ **launchd 常駐化** — plist + install/uninstall scripts
 
-3. **Git context 表示**
-   - session header に `branch · +12/-3 (dirty)` のような小さな表示
-   - サーバー: `git rev-parse`, `git status --porcelain`, `git diff --stat` を repo path で実行
-   - 5 秒ごとにポーリング、または turn 完了後に再取得
+### Phase 6 (実装中, 2026-04-09)
 
-4. **launchd による常駐化**
-   - `~/Library/LaunchAgents/com.kei.agent-cockpit.plist`
-   - PATH 問題に注意（launchd の PATH は空）
-   - mobile-first ではないが Phase 5 と独立で完結し、「scheduled cron や push 通知が意味を持つ前提条件」になるので Phase 5 に同梱する
+詳細プラン: `docs/plans/2026-04-09-phase6-observability-and-scheduling.md`
 
-### P1: Phase 6 以降に検討
+「観察性と自動化を上げる」基準で 5 項目を 1 phase でリリース。Worktree / Gemini を恒久却下にしたうえで残りを束ねる:
 
-5. **真の複数セッション並列ライブビュー**
-   - 複数 session を同時に WS 接続して live で観察
-   - 設計事項: 接続数上限 / inactive session の dehydration / battery saver モード / レイアウト
-   - スワイプナビ (P0) とは別の機能として独立フェーズで扱う
+1. **状態フィルタ** — HomePage の session list に `all / running / idle / error` chip を追加。Lobby (項目 2) の effectiveStatus を使う
+2. **Lobby WebSocket** — 新規 `/ws/lobby` 1 本で全 session の status 遷移を broadcast。HomePage がライブ更新
+3. **横断ビュー (cross-repo session list)** — `All Repos` selector + SessionList row に repo 名表示。サーバーは既に対応済み
+4. **埋め込みターミナル (debug view)** — Chat / Debug toggle。`<pre>` で raw JSONL をストリーム表示 (xterm.js は不採用)。reconnect 不可の live-only
+5. **スケジューリング (cron)** — node-cron + schedules テーブル + scheduler.ts。in-memory single-process / no catch-up / pre-approval なし (single-user trusted 前提)
 
-6. **Gemini adapter**
-   - `gemini` CLI が未インストールなので、まず インストール手順だけ README に書く
-   - adapter は base.ts を継ぎ足す形で実装。PATH と spawn の流儀は claude/codex を踏襲
-   - 当初 P0 に置いていたが、mobile-first 基準では justify できないので P1 へ降格
+### P3: 恒久却下（実装しない）
 
-7. **Git Worktree / workspace 管理**
-   - 各 session が独立した worktree (`<repo>/.worktrees/<session-id>`) を持てるようにする
-   - 並列 session が同じファイルを書き換える事故を防ぐ session-first 基盤
-   - sessions テーブルに `worktree_path` 追加 / `git worktree add` の lifecycle 管理 / 削除時のクリーンアップ
-   - master agent のような「自律オーケストレーション」ではなく「並列実行の安全化」として位置づける
+実装哲学・運用実情と矛盾する項目は、ロードマップを clean に保つために永久後退させる:
 
-8. **スケジューリング (cron / interval)**
-   - サーバーに schedule テーブル + node-cron 相当
-   - UI: session detail から「この prompt を毎朝 9 時に流す」を選べる
-   - セキュリティ: 任意 prompt の自動実行は事故りやすいので、scheduled prompt は事前承認制にする
-   - launchd 常駐 (P0) が前提
-
-9. **状態フィルタとしての session list 拡張**
-   - kanban "風" に running / waiting / done でフィルタリング
-   - 既存 session list に tab / chip を足すだけで十分
-
-### P2: 後回し
-
-10. **埋め込みターミナル (xterm.js) - secondary mode**
-    - chat ビューを主、terminal を escape hatch
-    - 範囲は「agent プロセスの生 stdio を覗く debug view」まで。**一般 CLI タスクの実行面は対象外** (それは mosh で行う)
-    - 実装コストが大きく、benefits が薄い可能性も
-
-11. **複数 repo 横断ビュー**
-    - 「最近触った session を repo 横断で一覧」
-    - 既存 session list の sort / filter 拡張
-
-### P3: 却下（実装しない）
-
-- マスターエージェント (Claude Code 側に移譲)
-- 自動アップデート機構 (`versions.json` API も不要)
-- 月額会員機能 / monetization
-- 一般 CLI タスク実行 (mosh / 既存ターミナルの責務)
-
----
-
-## Phase 5 として推奨するスコープ
-
-P0 の 4 項目だけを Phase 5 として切り出す。Gemini adapter は P1 へ降格、複数セッションは「スワイプナビ」だけに切り詰めた。
-
-| 項目 | 推定影響範囲 | 想定リスク |
-|---|---|---|
-| Web Push 通知 | server (新ルート + DB), frontend (SW + 設定 UI) | iOS Safari の Web Push は permission 取得タイミングが厳しい |
-| モバイル session スワイプナビ | frontend のみ (gesture handler + URL 遷移) | gesture と既存スクロールの競合 |
-| Git context 表示 | server (新ルート), frontend (small) | git コマンドの spawn コストとレース |
-| launchd 常駐化 | plist + start/stop スクリプト (server コードへの影響は最小) | PATH 空問題、再起動時の token 取り扱い |
-
-それぞれ独立しているので並列に進められる。実装プランは Phase 5 着手時に別途 `docs/plans/YYYY-MM-DD-phase5-*.md` で立てる。
+- **マスターエージェント** — Claude Code 自体が orchestration を内包しつつある。車輪の再発明
+- **Git Worktree / workspace 管理** — ユーザーが普段の並列実行でも worktree を使っていない。フォルダ散乱 / 切替コストが高い
+- **Gemini adapter** — ユーザーが gemini CLI を使っていない
+- **真の複数セッション並列ライブビュー (N 本 WS 同時接続)** — Lobby 版 (Phase 6) で得られる UX 価値の方が高く、N 本接続は接続数 / メモリ / 電池のコストに見合わない
+- **自動アップデート機構 / `versions.json` API** — 自作 OSS で配布形態が git pull
+- **月額会員機能 / monetization** — single-user 自作ツール
+- **一般 CLI タスク実行** — mosh / 既存ターミナルの責務
 
 ---
 
@@ -192,8 +142,8 @@ P0 の 4 項目だけを Phase 5 として切り出す。Gemini adapter は P1 �
 このプラン自体には実装が伴わない（ロードマップ文書）。検証は以下の観点で行う:
 
 1. AGI Cockpit の最新機能を見落としていないか → 上記ソース URL を再確認
-2. session-first 哲学と矛盾する項目を P0/P1 に入れていないか → README を再読してチェック
-3. 実装可能性 → 各項目の依存技術 (Web Push, node-cron, git CLI, gemini CLI) が現環境で動くか確認
+2. session-first 哲学と矛盾する項目を Phase 5/6 に入れていないか → README を再読してチェック
+3. 実装可能性 → 各項目の依存技術 (Web Push, node-cron, git CLI) が現環境で動くか確認
 
 ---
 
