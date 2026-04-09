@@ -2,6 +2,41 @@
 
 自作の「スマホから操作しやすい AI エージェント用 web cockpit」を作るための専用リポジトリ。
 
+## セットアップ
+
+```bash
+npm install
+npm run dev
+```
+
+- サーバー: `http://localhost:3001` (Fastify + WebSocket + SQLite)
+- フロントエンド: `http://localhost:3000` (Vite dev server, `/api` と `/ws` を proxy)
+
+初回起動時にサーバーが auth token を生成し、コンソールに表示する。
+ブラウザのログイン画面にこのトークンを貼り付けると `localStorage` に保存される。
+
+トークン保管先: `~/Library/Application Support/agent-cockpit/auth-token`
+DB 保管先: `~/Library/Application Support/agent-cockpit/cockpit.db`
+ログ保管先: `~/Library/Logs/agent-cockpit/server.log`
+
+### Tailscale 経由でスマホから使う
+
+サーバーは `127.0.0.1:3001` にしかバインドしないので、Tailscale Serve で
+tailnet 内のみに公開する。
+
+```bash
+# build したフロントを 3001 にぶら下げて HTTPS 公開
+cd packages/web && npm run build && cd -
+
+# Tailscale Serve で 3001 を 443 に公開（tailnet 内のみ）
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve https / http://127.0.0.1:3001
+```
+
+スマホの Tailscale クライアントで Mac mini に接続し、
+`https://<machine-name>.<tailnet>.ts.net/` を開いてログイン。
+
+注意: 公開インターネットには絶対に出さない。`tailscale funnel` は使わない。
+
 ## このリポジトリを作った背景
 
 - 2026-04-06 時点で `AGI Cockpit` を確認し、この Mac mini にインストールして起動まで確認した。

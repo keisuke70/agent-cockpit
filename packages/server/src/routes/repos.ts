@@ -3,6 +3,7 @@ import { nanoid } from "nanoid";
 import { existsSync } from "node:fs";
 import { createRepoSchema } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
+import { removeManaged } from "../process-manager.js";
 
 export async function repoRoutes(app: FastifyInstance) {
   app.get("/api/repos", () => {
@@ -43,10 +44,38 @@ export async function repoRoutes(app: FastifyInstance) {
 
   app.delete<{ Params: { id: string } }>("/api/repos/:id", (req, reply) => {
     const db = getDb();
-    const result = db.prepare("DELETE FROM repos WHERE id = ?").run(req.params.id);
+    const repoId = req.params.id;
+
+    // Cascade delete inside a transaction. Capture the affected session ids
+    // so we can tear down their managed processes only after a successful commit.
+    let affectedSessions: string[] = [];
+    const tx = db.transaction((id: string) => {
+      affectedSessions = (
+        db
+          .prepare("SELECT id FROM sessions WHERE repo_id = ?")
+          .all(id) as { id: string }[]
+      ).map((row) => row.id);
+
+      db.prepare(
+        "DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE repo_id = ?)",
+      ).run(id);
+      db.prepare(
+        "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE repo_id = ?)",
+      ).run(id);
+      db.prepare("DELETE FROM sessions WHERE repo_id = ?").run(id);
+      return db.prepare("DELETE FROM repos WHERE id = ?").run(id);
+    });
+
+    const result = tx(repoId);
     if (result.changes === 0) {
       return reply.status(404).send({ error: "Not found" });
     }
+
+    // Only after the DB transaction commits do we tear down in-memory processes.
+    for (const sid of affectedSessions) {
+      removeManaged(sid);
+    }
+
     return reply.status(204).send();
   });
 }

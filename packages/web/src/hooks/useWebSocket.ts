@@ -17,6 +17,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
 
   const connect = useCallback(() => {
@@ -38,6 +39,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
         clearTimeout(reconnectTimer.current);
         reconnectTimer.current = null;
       }
+      reconnectAttempts.current = 0;
       setStatus("idle");
     };
 
@@ -94,12 +96,16 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     ws.onclose = () => {
       if (intentionalClose.current) return;
       setStatus("connecting");
-      reconnectTimer.current = setTimeout(connect, 2000);
+      // Exponential backoff: 500ms, 1s, 2s, 4s, 8s, 16s, 30s (capped)
+      const attempt = reconnectAttempts.current++;
+      const delay = Math.min(500 * 2 ** attempt, 30000);
+      reconnectTimer.current = setTimeout(connect, delay);
     };
   }, [sessionId]);
 
   useEffect(() => {
     intentionalClose.current = false;
+    reconnectAttempts.current = 0;
     connect();
     return () => {
       intentionalClose.current = true;

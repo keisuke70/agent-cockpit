@@ -62,6 +62,20 @@ export function HomePage() {
     fetchRepos();
   }
 
+  async function deleteSelectedRepo() {
+    if (!selectedRepoId) return;
+    const repo = repos.find((r) => r.id === selectedRepoId);
+    if (!repo) return;
+    if (!confirm(`Delete repo "${repo.name}" and all its sessions?`)) return;
+    await fetch(`/api/repos/${selectedRepoId}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    setSelectedRepoId("");
+    setSessions([]);
+    fetchRepos();
+  }
+
   return (
     <>
       <header
@@ -74,16 +88,31 @@ export function HomePage() {
         }}
       >
         <h1 style={{ fontSize: 20, fontWeight: 600 }}>Agent Cockpit</h1>
-        <button
-          onClick={() => setShowAddRepo(!showAddRepo)}
-          style={{
-            fontSize: 13,
-            color: "var(--accent)",
-            padding: "6px 12px",
-          }}
-        >
-          {showAddRepo ? "Cancel" : "+ Repo"}
-        </button>
+        <div style={{ display: "flex", gap: 4 }}>
+          {selectedRepoId && (
+            <button
+              onClick={deleteSelectedRepo}
+              style={{
+                fontSize: 13,
+                color: "var(--danger)",
+                padding: "6px 12px",
+              }}
+              aria-label="Delete selected repo"
+            >
+              Delete
+            </button>
+          )}
+          <button
+            onClick={() => setShowAddRepo(!showAddRepo)}
+            style={{
+              fontSize: 13,
+              color: "var(--accent)",
+              padding: "6px 12px",
+            }}
+          >
+            {showAddRepo ? "Cancel" : "+ Repo"}
+          </button>
+        </div>
       </header>
 
       {showAddRepo && (
