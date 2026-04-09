@@ -4,6 +4,7 @@ import { getDb } from "../db.js";
 import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import type { CLIAdapter } from "../adapters/base.js";
+import { notifyAll } from "../push.js";
 import {
   type ManagedSession,
   getManaged,
@@ -12,6 +13,32 @@ import {
   nextSeq,
   broadcastEvent,
 } from "../process-manager.js";
+
+/**
+ * Shared termination notification helper. Called from every code path that
+ * transitions a session out of `running`: structured `turn_complete`, structured
+ * `error`, and the one-shot `close` fallback. Push delivery is fire-and-forget.
+ */
+function notifyTurnTerminated(
+  sessionId: string,
+  outcome: "complete" | "error" | "stopped",
+) {
+  const db = getDb();
+  const session = db
+    .prepare("SELECT name FROM sessions WHERE id = ?")
+    .get(sessionId) as { name: string | null } | undefined;
+  const name = session?.name || `Session ${sessionId.slice(0, 8)}`;
+  const titleByOutcome = {
+    complete: "Turn complete",
+    error: "Turn failed",
+    stopped: "Turn stopped",
+  } as const;
+  notifyAll({
+    title: titleByOutcome[outcome],
+    body: name,
+    sessionId,
+  });
+}
 
 function getAdapter(agent: AgentType): CLIAdapter {
   switch (agent) {
@@ -108,6 +135,7 @@ function attachProcessListeners(
           status: "idle",
           seq: nextSeq(managed),
         });
+        notifyTurnTerminated(sessionId, "complete");
       }
 
       if (event.type === "error") {
@@ -118,6 +146,7 @@ function attachProcessListeners(
           status: "error",
           seq: nextSeq(managed),
         });
+        notifyTurnTerminated(sessionId, "error");
       }
     }
   });
@@ -141,6 +170,7 @@ function attachProcessListeners(
             status: "idle",
             seq: nextSeq(managed),
           });
+          notifyTurnTerminated(sessionId, "complete");
         } else {
           stopTurn(sessionId);
           updateSessionStatus(sessionId, "stopped");
@@ -149,6 +179,7 @@ function attachProcessListeners(
             status: "stopped",
             seq: nextSeq(managed),
           });
+          notifyTurnTerminated(sessionId, "stopped");
         }
       }
       handle.proc = null;

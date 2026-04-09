@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import type { Repo, Session, AgentType } from "@agent-cockpit/shared";
 import { authHeaders } from "../hooks/useAuth.js";
+import { usePushSubscription } from "../hooks/usePushSubscription.js";
 import { RepoAgentSelector } from "../components/RepoAgentSelector.js";
 import { SessionList } from "../components/SessionList.js";
 
@@ -14,6 +15,7 @@ export function HomePage() {
   const [showAddRepo, setShowAddRepo] = useState(false);
   const [repoName, setRepoName] = useState("");
   const [repoPath, setRepoPath] = useState("");
+  const push = usePushSubscription();
 
   const fetchRepos = useCallback(async () => {
     const res = await fetch("/api/repos", { headers: authHeaders() });
@@ -151,6 +153,8 @@ export function HomePage() {
         </div>
       )}
 
+      <PushSettings push={push} />
+
       <RepoAgentSelector
         repos={repos}
         selectedRepoId={selectedRepoId}
@@ -163,7 +167,7 @@ export function HomePage() {
         <SessionList sessions={sessions} />
       </div>
 
-      <div style={{ padding: "12px 16px", paddingBottom: "calc(12px + var(--safe-bottom))" }}>
+      <div style={{ padding: "12px 16px", paddingBottom: "calc(12px + var(--safe-bottom))" }} data-section="new-session">
         <button
           onClick={createSession}
           disabled={!selectedRepoId}
@@ -182,5 +186,69 @@ export function HomePage() {
         </button>
       </div>
     </>
+  );
+}
+
+function PushSettings({ push }: { push: ReturnType<typeof usePushSubscription> }) {
+  const { state, busy, enable, disable } = push;
+
+  let label = "";
+  let action: (() => void) | null = null;
+  let actionLabel = "";
+  let disabled = busy;
+
+  switch (state) {
+    case "subscribed":
+      label = "Notifications: ON";
+      action = disable;
+      actionLabel = "Disable";
+      break;
+    case "default":
+      label = "Notifications: off";
+      action = enable;
+      actionLabel = "Enable";
+      break;
+    case "denied":
+      label = "Notifications blocked in browser settings";
+      disabled = true;
+      break;
+    case "ios-needs-pwa":
+      label = "iOS: add to Home Screen (16.4+) for notifications";
+      disabled = true;
+      break;
+    case "unsupported":
+      label = "Notifications not supported";
+      disabled = true;
+      break;
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "8px 16px",
+        borderBottom: "1px solid var(--border)",
+        fontSize: 13,
+        color: "var(--text-muted)",
+        gap: 12,
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+      {action && (
+        <button
+          onClick={action}
+          disabled={disabled}
+          style={{
+            fontSize: 13,
+            padding: "6px 12px",
+            color: disabled ? "var(--text-muted)" : "var(--accent)",
+          }}
+        >
+          {busy ? "..." : actionLabel}
+        </button>
+      )}
+    </div>
   );
 }

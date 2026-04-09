@@ -104,8 +104,15 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   }, [sessionId]);
 
   useEffect(() => {
+    // Reset all per-session state so that switching sessions does not carry
+    // over a stale lastSeq / messages / streaming buffer to the new socket.
     intentionalClose.current = false;
     reconnectAttempts.current = 0;
+    lastSeqRef.current = 0;
+    setMessages([]);
+    setStreamingText("");
+    setStatus("connecting");
+
     connect();
     return () => {
       intentionalClose.current = true;

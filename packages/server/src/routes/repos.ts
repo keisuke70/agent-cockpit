@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { createRepoSchema } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import { removeManaged } from "../process-manager.js";
+import { getGitStatus } from "../git.js";
 
 export async function repoRoutes(app: FastifyInstance) {
   app.get("/api/repos", () => {
@@ -41,6 +42,21 @@ export async function repoRoutes(app: FastifyInstance) {
 
     return reply.status(201).send({ id, name, path });
   });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/repos/:id/git-status",
+    async (req, reply) => {
+      const db = getDb();
+      const repo = db
+        .prepare("SELECT path FROM repos WHERE id = ?")
+        .get(req.params.id) as { path: string } | undefined;
+      if (!repo) {
+        return reply.status(404).send({ error: "Not found" });
+      }
+      const status = await getGitStatus(repo.path);
+      return status ?? { branch: null, dirty: false, filesChanged: 0, insertions: 0, deletions: 0 };
+    },
+  );
 
   app.delete<{ Params: { id: string } }>("/api/repos/:id", (req, reply) => {
     const db = getDb();

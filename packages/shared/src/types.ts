@@ -40,6 +40,15 @@ export interface Turn {
   metadata: string | null;
 }
 
+/** Git status snapshot for a repo path */
+export interface GitStatus {
+  branch: string;
+  dirty: boolean;
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
 /** Message record */
 export interface Message {
   id: string;

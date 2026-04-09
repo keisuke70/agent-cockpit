@@ -16,8 +16,10 @@ import fastifyStatic from "@fastify/static";
 import { getDb, closeDb } from "./db.js";
 import { repoRoutes } from "./routes/repos.js";
 import { sessionRoutes } from "./routes/sessions.js";
+import { pushRoutes } from "./routes/push.js";
 import { wsRoutes } from "./ws/handler.js";
 import { cleanupAll } from "./process-manager.js";
+import { initPush } from "./push.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -96,9 +98,13 @@ async function main() {
   // Initialize DB
   getDb();
 
+  // Initialize Web Push (loads or generates VAPID keys)
+  initPush();
+
   // Routes
   await app.register(repoRoutes);
   await app.register(sessionRoutes);
+  await app.register(pushRoutes);
   await app.register(wsRoutes);
 
   // Health check

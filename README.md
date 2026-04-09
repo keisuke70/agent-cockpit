@@ -37,6 +37,27 @@ cd packages/web && npm run build && cd -
 
 注意: 公開インターネットには絶対に出さない。`tailscale funnel` は使わない。
 
+### 常駐運用 (launchd)
+
+Mac 起動時に自動で agent-cockpit を立ち上げる。
+
+```bash
+# 初回 / 再ビルド時
+bash scripts/install-launchd.sh
+
+# 停止 / アンインストール
+bash scripts/uninstall-launchd.sh
+```
+
+`install-launchd.sh` は server / shared / web を build → plist を生成 → `~/Library/LaunchAgents/com.kei.agent-cockpit.plist` に配置 → `launchctl load` する。
+ログ:
+
+- stdout: `~/Library/Logs/agent-cockpit/launchd.out.log`
+- stderr: `~/Library/Logs/agent-cockpit/launchd.err.log`
+- Fastify アプリログ: `~/Library/Logs/agent-cockpit/server.log`
+
+Auth token は `~/Library/Application Support/agent-cockpit/auth-token` に永続保存されているので、launchd 経由で起動しても変わらない。
+
 ## このリポジトリを作った背景
 
 - 2026-04-06 時点で `AGI Cockpit` を確認し、この Mac mini にインストールして起動まで確認した。

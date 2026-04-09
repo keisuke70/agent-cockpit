@@ -72,6 +72,15 @@ function migrate(db: Database.Database) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id          TEXT PRIMARY KEY,
+      endpoint    TEXT NOT NULL UNIQUE,
+      p256dh      TEXT NOT NULL,
+      auth        TEXT NOT NULL,
+      enabled     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, seq);
