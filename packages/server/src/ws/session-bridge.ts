@@ -85,10 +85,8 @@ export async function ensureManaged(sessionId: string): Promise<ManagedSession> 
 
   setManaged(sessionId, managed);
 
-  // For Claude, the long-lived process is spawned in init()
-  if (handle.proc) {
-    attachProcessListeners(managed, sessionId, false);
-  }
+  // Both Claude and Codex are now one-shot-per-turn (no long-lived process
+  // from init). Process listeners are attached in sendPrompt after startTurn.
 
   return managed;
 }
@@ -249,11 +247,10 @@ export function sendPrompt(
   const seq = nextSeq(managed);
   broadcastEvent(managed, { type: "status", status: "running", seq });
 
-  const isOneShot = managed.adapter.name === "codex";
+  // Both Claude and Codex are one-shot-per-turn: startTurn spawns a new process.
   managed.adapter.startTurn(managed.handle, content);
 
-  // For codex, a new proc was spawned in startTurn, attach listeners
-  if (isOneShot && managed.handle.proc) {
+  if (managed.handle.proc) {
     attachProcessListeners(managed, sessionId, true);
   }
 

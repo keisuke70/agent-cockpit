@@ -62,14 +62,15 @@ async function main() {
     },
   });
 
-  // CORS: only allow localhost and tailscale origins
+  // CORS: allow localhost, tailscale IPs, and *.ts.net (Tailscale Serve HTTPS)
   await app.register(cors, {
     origin: (origin, cb) => {
       if (
         !origin ||
         origin.startsWith("http://localhost") ||
         origin.startsWith("http://127.0.0.1") ||
-        origin.match(/^https?:\/\/100\.\d+\.\d+\.\d+/)
+        origin.match(/^https?:\/\/100\.\d+\.\d+\.\d+/) ||
+        origin.match(/^https:\/\/[a-z0-9-]+\.tail[a-z0-9]+\.ts\.net$/)
       ) {
         cb(null, true);
       } else {

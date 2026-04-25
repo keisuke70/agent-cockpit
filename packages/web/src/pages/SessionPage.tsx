@@ -5,7 +5,7 @@ import { useWebSocket } from "../hooks/useWebSocket.js";
 import { useSession } from "../hooks/useSession.js";
 import { useGitStatus } from "../hooks/useGitStatus.js";
 import { useRepoSessions } from "../hooks/useRepoSessions.js";
-import { useSwipeNavigation } from "../hooks/useSwipeNavigation.js";
+import { authHeaders } from "../hooks/useAuth.js";
 import { StreamOutput } from "../components/StreamOutput.js";
 import { TerminalView } from "../components/TerminalView.js";
 import { Composer } from "../components/Composer.js";
@@ -17,9 +17,11 @@ export function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const session = useSession(id!);
-  const { messages, streamingText, rawStdout, status, sendPrompt, stop, retry } =
+  const { messages, streamingText, activeTools, rawStdout, status, sendPrompt, stop, retry } =
     useWebSocket(id!);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const { status: gitStatus, refresh: refreshGit } = useGitStatus(session?.repoId);
   const repoSessions = useRepoSessions(session?.repoId);
 
@@ -32,7 +34,7 @@ export function SessionPage() {
     prevStatusRef.current = status;
   }, [status, refreshGit]);
 
-  // Find sibling sessions for swipe navigation (in updated_at desc order from API).
+  // Find sibling sessions for explicit header navigation (in updated_at desc order from API).
   const { prevId, nextId, currentIndex, totalCount } = useMemo(() => {
     const idx = repoSessions.findIndex((s) => s.id === id);
     return {
@@ -43,17 +45,37 @@ export function SessionPage() {
     };
   }, [repoSessions, id]);
 
-  const swipeHandlers = useSwipeNavigation({
-    onSwipeLeft: () => {
-      if (nextId) navigate(`/session/${nextId}`);
-    },
-    onSwipeRight: () => {
-      if (prevId) navigate(`/session/${prevId}`);
-    },
-  });
-
   const displayName = session?.name || `Session ${id?.slice(0, 8)}`;
   const agent = session?.agent ?? "";
+
+  async function deleteSession() {
+    if (!id || isDeleting) return;
+    const confirmed = confirm(
+      `Delete "${displayName}"? This removes its messages and schedules.`,
+    );
+    if (!confirmed) return;
+
+    setIsDeleting(true);
+    setDeleteError("");
+    try {
+      const res = await fetch(`/api/sessions/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setDeleteError(body.error ?? `Delete failed (${res.status})`);
+        return;
+      }
+
+      navigate("/", { replace: true });
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
 
   return (
     <>
@@ -111,20 +133,26 @@ export function SessionPage() {
           >
             <StatusLabel status={status} />
             {gitStatus && <GitBadge status={gitStatus} />}
+            {deleteError && (
+              <span role="alert" style={{ color: "var(--danger)" }}>
+                {deleteError}
+              </span>
+            )}
           </div>
         </div>
         {totalCount > 1 && currentIndex >= 0 && (
-          <span
-            style={{
-              fontSize: 12,
-              color: "var(--text-muted)",
-              fontFamily: "ui-monospace, SFMono-Regular, monospace",
-              marginRight: 4,
+          <SessionNavigator
+            current={currentIndex + 1}
+            total={totalCount}
+            hasNewer={Boolean(prevId)}
+            hasOlder={Boolean(nextId)}
+            onNewer={() => {
+              if (prevId) navigate(`/session/${prevId}`, { replace: true });
             }}
-            title="Swipe left/right to switch sessions"
-          >
-            {currentIndex + 1}/{totalCount}
-          </span>
+            onOlder={() => {
+              if (nextId) navigate(`/session/${nextId}`, { replace: true });
+            }}
+          />
         )}
         <button
           onClick={() => setViewMode(viewMode === "chat" ? "debug" : "chat")}
@@ -143,23 +171,132 @@ export function SessionPage() {
         >
           {viewMode === "debug" ? "Debug" : "Chat"}
         </button>
+        <button
+          type="button"
+          onClick={deleteSession}
+          disabled={isDeleting}
+          style={{
+            fontSize: 11,
+            padding: "4px 10px",
+            borderRadius: 999,
+            background: "var(--bg-surface)",
+            color: "var(--danger)",
+            border: "1px solid var(--border)",
+            fontWeight: 600,
+            minHeight: 28,
+            opacity: isDeleting ? 0.5 : 1,
+            cursor: isDeleting ? "default" : "pointer",
+          }}
+        >
+          {isDeleting ? "Deleting" : "Delete"}
+        </button>
         <StatusDot status={status} />
       </header>
 
       <SchedulePanel sessionId={id!} />
 
       <div
-        style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
-        {...swipeHandlers}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          touchAction: "pan-y",
+          overscrollBehaviorX: "contain",
+        }}
       >
         {viewMode === "chat" ? (
-          <StreamOutput messages={messages} streamingText={streamingText} />
+          <StreamOutput messages={messages} streamingText={streamingText} activeTools={activeTools} />
         ) : (
           <TerminalView data={rawStdout} />
         )}
       </div>
       <Composer status={status} onSend={sendPrompt} onStop={stop} onRetry={retry} />
     </>
+  );
+}
+
+function SessionNavigator({
+  current,
+  total,
+  hasNewer,
+  hasOlder,
+  onNewer,
+  onOlder,
+}: {
+  current: number;
+  total: number;
+  hasNewer: boolean;
+  hasOlder: boolean;
+  onNewer: () => void;
+  onOlder: () => void;
+}) {
+  return (
+    <nav
+      aria-label="Session navigation"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        marginRight: 4,
+      }}
+    >
+      <button
+        type="button"
+        disabled={!hasNewer}
+        onClick={onNewer}
+        aria-label="Newer session"
+        title="Newer session"
+        style={{
+          minWidth: 36,
+          minHeight: 36,
+          borderRadius: "50%",
+          border: "1px solid var(--border)",
+          background: "var(--bg-surface)",
+          color: hasNewer ? "var(--text)" : "var(--text-muted)",
+          opacity: hasNewer ? 1 : 0.35,
+          cursor: hasNewer ? "pointer" : "default",
+          fontSize: 18,
+          lineHeight: 1,
+        }}
+      >
+        ‹
+      </button>
+      <span
+        aria-current="page"
+        style={{
+          fontSize: 12,
+          color: "var(--text-muted)",
+          fontFamily: "ui-monospace, SFMono-Regular, monospace",
+          minWidth: 38,
+          textAlign: "center",
+        }}
+        title="Current session position"
+      >
+        {current}/{total}
+      </span>
+      <button
+        type="button"
+        disabled={!hasOlder}
+        onClick={onOlder}
+        aria-label="Older session"
+        title="Older session"
+        style={{
+          minWidth: 36,
+          minHeight: 36,
+          borderRadius: "50%",
+          border: "1px solid var(--border)",
+          background: "var(--bg-surface)",
+          color: hasOlder ? "var(--text)" : "var(--text-muted)",
+          opacity: hasOlder ? 1 : 0.35,
+          cursor: hasOlder ? "pointer" : "default",
+          fontSize: 18,
+          lineHeight: 1,
+        }}
+      >
+        ›
+      </button>
+    </nav>
   );
 }
 

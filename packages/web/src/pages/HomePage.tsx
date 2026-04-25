@@ -34,14 +34,23 @@ export function HomePage() {
   const navigate = useNavigate();
   const [repos, setRepos] = useState<Repo[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [selectedRepoId, setSelectedRepoId] = useState("");
-  const [selectedAgent, setSelectedAgent] = useState<AgentType>("claude");
+  const [selectedRepoId, setSelectedRepoId] = useState(
+    () => localStorage.getItem("cockpit-selected-repo") ?? "",
+  );
+  const [selectedAgent, setSelectedAgent] = useState<AgentType>(() => {
+    const stored = localStorage.getItem("cockpit-selected-agent");
+    return stored === "claude" || stored === "codex" ? stored : "claude";
+  });
   const [showAddRepo, setShowAddRepo] = useState(false);
   const [repoName, setRepoName] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const push = usePushSubscription();
   const liveStatuses = useLobby();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [deletingSessionIds, setDeletingSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [deleteSessionError, setDeleteSessionError] = useState("");
 
   const isAllRepos = selectedRepoId === ALL_REPOS;
   const isSpecificRepo = selectedRepoId !== "" && !isAllRepos;
@@ -62,14 +71,32 @@ export function HomePage() {
     });
   }, [sessions, liveStatuses, statusFilter]);
 
+  const handleRepoChange = useCallback((id: string) => {
+    setSelectedRepoId(id);
+    localStorage.setItem("cockpit-selected-repo", id);
+  }, []);
+
+  const handleAgentChange = useCallback((agent: AgentType) => {
+    setSelectedAgent(agent);
+    localStorage.setItem("cockpit-selected-agent", agent);
+  }, []);
+
   const fetchRepos = useCallback(async () => {
     const res = await fetch("/api/repos", { headers: authHeaders() });
-    const data = await res.json();
+    const data = (await res.json()) as Repo[];
     setRepos(data);
-    if (data.length > 0 && !selectedRepoId) {
-      setSelectedRepoId(data[0].id);
+
+    if (data.length === 0) {
+      if (selectedRepoId) handleRepoChange("");
+      return;
     }
-  }, [selectedRepoId]);
+
+    const selectedExists =
+      selectedRepoId === ALL_REPOS || data.some((repo) => repo.id === selectedRepoId);
+    if (!selectedRepoId || !selectedExists) {
+      handleRepoChange(data[0].id);
+    }
+  }, [handleRepoChange, selectedRepoId]);
 
   const fetchSessions = useCallback(async () => {
     if (!selectedRepoId) return;
@@ -99,16 +126,67 @@ export function HomePage() {
     navigate(`/session/${session.id}`);
   }
 
+  async function deleteSessionFromList(session: Session) {
+    if (deletingSessionIds.has(session.id)) return;
+
+    const label = session.name || `Session ${session.id.slice(0, 8)}`;
+    const confirmed = confirm(
+      `Delete "${label}"? This removes its messages and schedules.`,
+    );
+    if (!confirmed) return;
+
+    setDeleteSessionError("");
+    setDeletingSessionIds((prev) => {
+      const next = new Set(prev);
+      next.add(session.id);
+      return next;
+    });
+
+    try {
+      const res = await fetch(`/api/sessions/${session.id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+
+      if (res.ok) {
+        setSessions((prev) => prev.filter((s) => s.id !== session.id));
+        return;
+      }
+
+      const body = await res.json().catch(() => ({}));
+      setDeleteSessionError(body.error ?? `Delete failed (${res.status})`);
+    } catch (err) {
+      setDeleteSessionError(
+        err instanceof Error ? err.message : "Delete failed",
+      );
+    } finally {
+      setDeletingSessionIds((prev) => {
+        const next = new Set(prev);
+        next.delete(session.id);
+        return next;
+      });
+    }
+  }
+
+  const [addRepoError, setAddRepoError] = useState("");
+
   async function addRepo() {
     if (!repoName.trim() || !repoPath.trim()) return;
-    await fetch("/api/repos", {
+    setAddRepoError("");
+    const res = await fetch("/api/repos", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ name: repoName.trim(), path: repoPath.trim() }),
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setAddRepoError(body.error ?? `Error ${res.status}`);
+      return;
+    }
     setRepoName("");
     setRepoPath("");
     setShowAddRepo(false);
+    setAddRepoError("");
     fetchRepos();
   }
 
@@ -121,7 +199,7 @@ export function HomePage() {
       method: "DELETE",
       headers: authHeaders(),
     });
-    setSelectedRepoId("");
+    handleRepoChange("");
     setSessions([]);
     fetchRepos();
   }
@@ -181,10 +259,13 @@ export function HomePage() {
             onChange={(e) => setRepoName(e.target.value)}
           />
           <input
-            placeholder="Absolute path (e.g. /Users/kei/projects/myapp)"
+            placeholder="Mac local path (e.g. /Users/kei/projects/myapp)"
             value={repoPath}
             onChange={(e) => setRepoPath(e.target.value)}
           />
+          {addRepoError && (
+            <span style={{ fontSize: 13, color: "var(--danger)" }}>{addRepoError}</span>
+          )}
           <button
             onClick={addRepo}
             style={{
@@ -207,17 +288,32 @@ export function HomePage() {
         repos={repos}
         selectedRepoId={selectedRepoId}
         selectedAgent={selectedAgent}
-        onRepoChange={setSelectedRepoId}
-        onAgentChange={setSelectedAgent}
+        onRepoChange={handleRepoChange}
+        onAgentChange={handleAgentChange}
       />
 
       <StatusFilterChips value={statusFilter} onChange={setStatusFilter} />
+
+      {deleteSessionError && (
+        <div
+          role="alert"
+          style={{
+            padding: "0 16px 10px",
+            color: "var(--danger)",
+            fontSize: 13,
+          }}
+        >
+          {deleteSessionError}
+        </div>
+      )}
 
       <div style={{ flex: 1, overflowY: "auto" }}>
         <SessionList
           sessions={filteredSessions}
           repoNames={isAllRepos ? repoNames : undefined}
           liveStatuses={liveStatuses}
+          onDeleteSession={deleteSessionFromList}
+          deletingSessionIds={deletingSessionIds}
         />
       </div>
 

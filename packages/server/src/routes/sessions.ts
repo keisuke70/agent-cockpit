@@ -2,6 +2,14 @@ import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
 import { createSessionSchema } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
+import { getManaged, removeManaged } from "../process-manager.js";
+import { removeScheduleRunner } from "../scheduler.js";
+
+function detachManagedProcessListeners(sessionId: string) {
+  const proc = getManaged(sessionId)?.handle.proc;
+  proc?.stdout?.removeAllListeners("data");
+  proc?.removeAllListeners("close");
+}
 
 export async function sessionRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { repoId?: string } }>("/api/sessions", (req) => {
@@ -76,5 +84,47 @@ export async function sessionRoutes(app: FastifyInstance) {
          FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
       )
       .all(req.params.id);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
+    const db = getDb();
+    const sessionId = req.params.id;
+    const session = db
+      .prepare("SELECT id FROM sessions WHERE id = ?")
+      .get(sessionId);
+
+    if (!session) {
+      return reply.status(404).send({ error: "Not found" });
+    }
+
+    // Delete all rows that reference the session explicitly because the schema
+    // does not declare ON DELETE CASCADE. Capture schedule ids first so their
+    // in-memory cron runners can be stopped after the DB transaction commits.
+    let scheduleIds: string[] = [];
+    const tx = db.transaction((id: string) => {
+      scheduleIds = (
+        db
+          .prepare("SELECT id FROM schedules WHERE session_id = ?")
+          .all(id) as { id: string }[]
+      ).map((row) => row.id);
+
+      db.prepare("DELETE FROM schedules WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM turns WHERE session_id = ?").run(id);
+      db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    });
+
+    tx(sessionId);
+
+    for (const scheduleId of scheduleIds) {
+      removeScheduleRunner(scheduleId);
+    }
+    // The DB commit is complete, and we are still in the same event-loop turn:
+    // detach process listeners before killing the process so late stdout/close
+    // events cannot write back into rows that were just deleted.
+    detachManagedProcessListeners(sessionId);
+    removeManaged(sessionId);
+
+    return reply.status(204).send();
   });
 }

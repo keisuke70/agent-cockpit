@@ -25,7 +25,7 @@ export function RepoAgentSelector({
         onChange={(e) => onRepoChange(e.target.value)}
         style={{ flex: 1, minHeight: 44 }}
       >
-        <option value="">Select repo...</option>
+        {repos.length === 0 && <option value="">No repos registered</option>}
         <option value={ALL_REPOS}>All Repos</option>
         {repos.map((r) => (
           <option key={r.id} value={r.id}>

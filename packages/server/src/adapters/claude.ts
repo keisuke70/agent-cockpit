@@ -1,43 +1,64 @@
 import { spawn } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
 import type { CLIAdapter, AdapterHandle, NormalizedEvent } from "./base.js";
 import { makeSpawnEnv } from "./base.js";
 
 const CLAUDE_BIN = "/Users/kei/.local/bin/claude";
 
+/**
+ * Claude adapter. Each turn spawns a new `claude --print` process. Multi-turn
+ * continuity is handled via `--resume <session-id>`: Claude CLI's own session
+ * persistence loads the prior conversation.
+ *
+ * Key flags:
+ * - `--settings '{"enabledPlugins":{}}'`: Disable plugins that hang in headless
+ *   `--print` mode (e.g. frontend-design, swift-lsp try to initialize LSP/MCP
+ *   connections that never complete without an interactive terminal). All other
+ *   project settings (MCP servers, permissions, hooks, skills, CLAUDE.md) remain
+ *   fully loaded.
+ * - Prompt is passed as a CLI positional arg, not via stdin.
+ */
 export class ClaudeAdapter implements CLIAdapter {
   readonly name = "claude";
 
-  async init(opts: { cwd: string; cliSessionId?: string }): Promise<AdapterHandle> {
+  async init(opts: { cwd: string; cliSessionId?: string }): Promise<ClaudeHandle> {
+    return {
+      proc: null,
+      cliSessionId: opts.cliSessionId,
+      cwd: opts.cwd,
+    };
+  }
+
+  startTurn(handle: AdapterHandle, prompt: string): void {
+    const h = handle as ClaudeHandle;
+
     const args = [
       "--print",
       "--output-format",
       "stream-json",
-      "--input-format",
-      "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--dangerously-skip-permissions",
+      "--settings",
+      '{"enabledPlugins":{}}',
     ];
 
-    if (opts.cliSessionId) {
-      args.push("--resume", opts.cliSessionId);
+    if (h.cliSessionId) {
+      args.push("--resume", h.cliSessionId);
     }
 
+    // Prompt as the final positional argument
+    args.push(prompt);
+
     const proc = spawn(CLAUDE_BIN, args, {
-      cwd: opts.cwd,
+      cwd: h.cwd,
       env: makeSpawnEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    return { proc, cliSessionId: opts.cliSessionId };
-  }
+    // Close stdin immediately — we pass the prompt as a CLI arg, not via stdin
+    proc.stdin.end();
 
-  startTurn(handle: AdapterHandle, prompt: string): void {
-    if (!handle.proc?.stdin?.writable) {
-      throw new Error("Claude process stdin not available");
-    }
-    const msg = JSON.stringify({ type: "user", content: prompt });
-    handle.proc.stdin.write(msg + "\n");
+    h.proc = proc;
   }
 
   stopTurn(handle: AdapterHandle): void {
@@ -49,8 +70,8 @@ export class ClaudeAdapter implements CLIAdapter {
   dispose(handle: AdapterHandle): void {
     if (handle.proc && !handle.proc.killed) {
       handle.proc.kill("SIGTERM");
-      handle.proc = null;
     }
+    handle.proc = null;
   }
 
   parseEvent(line: string): NormalizedEvent | null {
@@ -122,4 +143,8 @@ export class ClaudeAdapter implements CLIAdapter {
 
     return null;
   }
+}
+
+export interface ClaudeHandle extends AdapterHandle {
+  cwd: string;
 }

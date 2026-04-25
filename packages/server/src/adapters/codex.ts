@@ -3,6 +3,7 @@ import type { CLIAdapter, AdapterHandle, NormalizedEvent } from "./base.js";
 import { makeSpawnEnv } from "./base.js";
 
 const CODEX_BIN = "/opt/homebrew/bin/codex";
+const CODEX_TRUSTED_EXECUTION_ARG = "--dangerously-bypass-approvals-and-sandbox";
 
 export interface CodexHandle extends AdapterHandle {
   cwd: string;
@@ -17,21 +18,33 @@ export class CodexAdapter implements CLIAdapter {
 
   startTurn(handle: AdapterHandle, prompt: string): void {
     const codexHandle = handle as CodexHandle;
+    // -C is exec-level only; --json and the bypass flag live on each subcommand.
+    const args = ["exec", "-C", codexHandle.cwd];
+
+    if (codexHandle.cliSessionId) {
+      args.push(
+        "resume",
+        "--json",
+        CODEX_TRUSTED_EXECUTION_ARG,
+        codexHandle.cliSessionId,
+        "-",
+      );
+    } else {
+      args.push("--json", CODEX_TRUSTED_EXECUTION_ARG, "-");
+    }
+
     const proc = spawn(
       CODEX_BIN,
-      [
-        "exec",
-        "--json",
-        "-C",
-        codexHandle.cwd,
-        "--full-auto",
-        prompt,
-      ],
+      args,
       {
         env: makeSpawnEnv(),
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
+    // Send the prompt via stdin so resumed sessions can use `codex exec resume ... -`
+    // and long prompts do not need to fit in argv.
+    proc.stdin.end(prompt);
+
     handle.proc = proc;
   }
 

@@ -1,13 +1,15 @@
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Message } from "@agent-cockpit/shared";
+import type { ToolActivity } from "../hooks/useWebSocket.js";
 
 interface StreamOutputProps {
   messages: Message[];
   streamingText: string;
+  activeTools?: ToolActivity[];
 }
 
-export function StreamOutput({ messages, streamingText }: StreamOutputProps) {
+export function StreamOutput({ messages, streamingText, activeTools }: StreamOutputProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolled = useRef(false);
@@ -61,6 +63,22 @@ export function StreamOutput({ messages, streamingText }: StreamOutputProps) {
         <MessageBubble role="assistant" content={streamingText} streaming />
       )}
 
+      {activeTools && activeTools.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            alignSelf: "flex-start",
+            maxWidth: "85%",
+          }}
+        >
+          {activeTools.map((t, i) => (
+            <ToolBadge key={i} tool={t.tool} input={t.input} />
+          ))}
+        </div>
+      )}
+
       <div ref={bottomRef} />
     </div>
   );
@@ -110,6 +128,44 @@ function MessageBubble({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function ToolBadge({ tool, input }: { tool: string; input: unknown }) {
+  let detail = "";
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    // Show the most useful field depending on the tool
+    if (typeof obj.command === "string") {
+      detail = obj.command.length > 80 ? obj.command.slice(0, 80) + "..." : obj.command;
+    } else if (typeof obj.file_path === "string") {
+      detail = obj.file_path;
+    } else if (typeof obj.pattern === "string") {
+      detail = obj.pattern;
+    } else if (typeof obj.query === "string") {
+      detail = obj.query.length > 60 ? obj.query.slice(0, 60) + "..." : obj.query;
+    }
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "6px 12px",
+        borderRadius: "var(--radius-sm)",
+        background: "var(--bg-surface)",
+        border: "1px solid var(--border)",
+        fontSize: 12,
+        fontFamily: "ui-monospace, SFMono-Regular, monospace",
+        color: "var(--text-muted)",
+        animation: "blink 2s ease-in-out infinite",
+      }}
+    >
+      <span style={{ color: "var(--accent)", fontWeight: 600 }}>{tool}</span>
+      {detail && <span style={{ opacity: 0.7 }}>{detail}</span>}
     </div>
   );
 }

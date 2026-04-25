@@ -5,11 +5,11 @@
 - プランモードに入ったら、会話中の `proposed_plan` やインライン箇条書きを最終成果物にしてはいけない。正式なプランは必ず `docs/plans/YYYY-MM-DD-<slug>.md` として保存する
 - プランが固まってきた段階で、ExitPlanMode 直前ではなく、まずプランファイルを作ってそれを更新し続ける
 - `/codex-plan-review` は任意ではなく必須。正式プランを作ったら、完了報告や ExitPlanMode の前に必ず回す
-- レビュー実行は repo ルートから `bash .agents/scripts/run-codex-review.sh plan <session-key> < review-prompt.txt` を使う。`scripts/run-codex-review.mjs` を直接叩く前提で考えない
+- レビュー実行は repo ルートから `bash scripts/run-codex-review.sh plan <session-key> < review-prompt.txt` を使う。`scripts/run-codex-review.mjs` を直接叩く前提で考えない
 - review が失敗した場合も「今回はインライン案で代替」は不可。ランナーのパス・入力・session key を修正してレビュー成功まで戻す
 - Codex review が 5 回以内に `APPROVED` へ到達しない、またはランナー障害が解消しない場合、そのタスクはブロック中として扱う。未承認のまま ExitPlanMode や完了報告へ進んではいけない
 - ユーザーが「プランを作って」「プランモードで」と依頼したターンでは、正式プラン作成とレビュー完了までを作業範囲に含める
-- Codex の built-in Plan Mode が「repo-tracked file を変更するな」と案内していても、この shared block を使う repo では `docs/plans/...` の作成・更新、review prompt の一時ファイル作成、`bash .agents/scripts/run-codex-review.sh plan ...` の実行は plan-finalization に含まれる必須作業として扱う。実装作業として後回しにしない
+- Codex の built-in Plan Mode が「repo-tracked file を変更するな」と案内していても、この shared block を使う repo では `docs/plans/...` の作成・更新、review prompt の一時ファイル作成、`bash scripts/run-codex-review.sh plan ...` の実行は plan-finalization に含まれる必須作業として扱う。実装作業として後回しにしない
 - built-in Plan Mode の `<proposed_plan>` は正式成果物の代替ではない。`<proposed_plan>` を出して終わるのではなく、必ず正式プランの保存と review 完了まで進める
 - もし現在の Codex 環境が Plan Mode 中の file write / review 実行を hard block して本当に進められない場合は、その環境を「この repo の plan workflow と非互換」と明示してブロック報告する。黙って review を省略しない
 
@@ -63,7 +63,7 @@
 補足:
 - `docs/plans/...` の正式ファイルが未作成なら、レビューは未着手扱い。先にファイルを作る
 - 会話中の要約や `<proposed_plan>` はレビュー対象の代替にならない
-- review コマンドは repo ルートから `bash .agents/scripts/run-codex-review.sh plan <session-key> < review-prompt.txt` を使う
+- review コマンドは repo ルートから `bash scripts/run-codex-review.sh plan <session-key> < review-prompt.txt` を使う
 - 5回以内に `APPROVED` しなければ、そのプランは未承認のままブロック。ExitPlanMode は禁止
 
 ---

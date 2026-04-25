@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import type { Message, SessionStatus, ServerEvent } from "@agent-cockpit/shared";
 
+export interface ToolActivity {
+  tool: string;
+  input: unknown;
+  timestamp: number;
+}
+
 interface UseWebSocketResult {
   messages: Message[];
   streamingText: string;
+  /** Currently active tool (e.g. "Bash", "Edit"). Cleared on message_complete. */
+  activeTools: ToolActivity[];
   /** Live raw stdout buffer for the embedded terminal Debug view. */
   rawStdout: string;
   status: SessionStatus | "connecting";
@@ -18,6 +26,7 @@ const RAW_STDOUT_MAX_BYTES = 64 * 1024;
 export function useWebSocket(sessionId: string): UseWebSocketResult {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingText, setStreamingText] = useState("");
+  const [activeTools, setActiveTools] = useState<ToolActivity[]>([]);
   const [rawStdout, setRawStdout] = useState("");
   const [status, setStatus] = useState<SessionStatus | "connecting">("connecting");
   const wsRef = useRef<WebSocket | null>(null);
@@ -81,6 +90,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
             },
           ]);
           setStreamingText("");
+          setActiveTools([]);
           break;
 
         case "status":
@@ -90,11 +100,19 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           }
           break;
 
+        case "tool_use":
+          setActiveTools((prev) => [
+            ...prev,
+            { tool: event.tool, input: event.input, timestamp: Date.now() },
+          ]);
+          break;
+
         case "error":
           setStatus("error");
           break;
 
         case "turn_complete":
+          setActiveTools([]);
           break;
 
         case "raw_stdout":
@@ -126,6 +144,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     lastSeqRef.current = 0;
     setMessages([]);
     setStreamingText("");
+    setActiveTools([]);
     setRawStdout("");
     setStatus("connecting");
 
@@ -190,5 +209,5 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
-  return { messages, streamingText, rawStdout, status, sendPrompt, stop, retry };
+  return { messages, streamingText, activeTools, rawStdout, status, sendPrompt, stop, retry };
 }
