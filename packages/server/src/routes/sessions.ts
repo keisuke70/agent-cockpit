@@ -6,7 +6,7 @@ import { getManaged, removeManaged } from "../process-manager.js";
 import { removeScheduleRunner } from "../scheduler.js";
 
 function detachManagedProcessListeners(sessionId: string) {
-  const proc = getManaged(sessionId)?.handle.proc;
+  const proc = getManaged(sessionId)?.handle?.proc;
   proc?.stdout?.removeAllListeners("data");
   proc?.removeAllListeners("close");
 }

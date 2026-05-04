@@ -1,10 +1,22 @@
 import { nanoid } from "nanoid";
-import type { AgentType, ServerEvent, SessionStatus } from "@agent-cockpit/shared";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  SLASH_COMMANDS,
+  findSlashCommandDefinition,
+  type AgentType,
+  type ServerEvent,
+  type SessionStatus,
+} from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import { ClaudeAdapter } from "../adapters/claude.js";
 import { CodexAdapter } from "../adapters/codex.js";
 import type { CLIAdapter } from "../adapters/base.js";
 import { notifyAll } from "../push.js";
+import {
+  getCodexAppServerClient,
+  type AppServerMessage,
+} from "../codex/app-server-client.js";
 import {
   type ManagedSession,
   getManaged,
@@ -14,6 +26,8 @@ import {
   broadcastEvent,
   broadcastLobby,
 } from "../process-manager.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Shared termination notification helper. Called from every code path that
@@ -46,6 +60,8 @@ function getAdapter(agent: AgentType): CLIAdapter {
     case "claude":
       return new ClaudeAdapter();
     case "codex":
+      // Kept as a fallback type-level branch. `ensureManaged` routes Codex to
+      // app-server before this is used.
       return new CodexAdapter();
   }
 }
@@ -67,8 +83,19 @@ export async function ensureManaged(sessionId: string): Promise<ManagedSession> 
     .get(session.repo_id) as any;
   if (!repo) throw new Error(`Repo for session ${sessionId} not found`);
 
-  const adapter = getAdapter(session.agent);
   const cwd = session.cwd ?? repo.path;
+
+  if (session.agent === "codex") {
+    managed = await ensureCodexAppServerManaged({
+      sessionId,
+      cwd,
+      cliSessionId: session.cli_session_id ?? undefined,
+    });
+    setManaged(sessionId, managed);
+    return managed;
+  }
+
+  const adapter = getAdapter(session.agent);
   const handle = await adapter.init({
     cwd,
     cliSessionId: session.cli_session_id ?? undefined,
@@ -76,6 +103,7 @@ export async function ensureManaged(sessionId: string): Promise<ManagedSession> 
 
   managed = {
     sessionId,
+    runtime: "cli",
     adapter,
     handle,
     seq: 0,
@@ -85,8 +113,72 @@ export async function ensureManaged(sessionId: string): Promise<ManagedSession> 
 
   setManaged(sessionId, managed);
 
-  // Both Claude and Codex are now one-shot-per-turn (no long-lived process
-  // from init). Process listeners are attached in sendPrompt after startTurn.
+  // Claude is one-shot-per-turn (no long-lived process from init). Process
+  // listeners are attached in sendPrompt after startTurn.
+
+  return managed;
+}
+
+async function ensureCodexAppServerManaged(opts: {
+  sessionId: string;
+  cwd: string;
+  cliSessionId?: string;
+}): Promise<ManagedSession> {
+  const client = await getCodexAppServerClient();
+  let threadId: string | null = null;
+  let threadStatusType: string | null = null;
+
+  if (opts.cliSessionId) {
+    try {
+      const resumed = await client.request("thread/resume", {
+        threadId: opts.cliSessionId,
+        cwd: opts.cwd,
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      });
+      threadId = resumed?.thread?.id ?? opts.cliSessionId;
+      threadStatusType = resumed?.thread?.status?.type ?? null;
+    } catch {
+      threadId = null;
+    }
+  }
+
+  if (!threadId) {
+    const started = await client.request("thread/start", {
+      cwd: opts.cwd,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      serviceName: "agent_cockpit",
+      experimentalRawEvents: true,
+    });
+    threadId = started?.thread?.id;
+    if (!threadId) throw new Error("Codex app-server did not return a thread id");
+    threadStatusType = started?.thread?.status?.type ?? null;
+
+    getDb()
+      .prepare(
+        "UPDATE sessions SET cli_session_id = ?, updated_at = datetime('now') WHERE id = ?",
+      )
+      .run(threadId, opts.sessionId);
+  }
+
+  reconcileCodexThreadStatus(opts.sessionId, threadStatusType);
+
+  const managed: ManagedSession = {
+    sessionId: opts.sessionId,
+    runtime: "codex-app-server",
+    codexThreadId: threadId,
+    codexActiveTurnId: null,
+    codexStopRequested: false,
+    codexStoppingTurnId: null,
+    seq: 0,
+    eventBuffer: [],
+    listeners: new Set(),
+  };
+
+  managed.cleanup = client.subscribeThread(threadId, (message) => {
+    handleCodexAppServerMessage(managed, opts.sessionId, message);
+  });
 
   return managed;
 }
@@ -97,7 +189,7 @@ function attachProcessListeners(
   isOneShot: boolean,
 ) {
   const { handle, adapter } = managed;
-  if (!handle.proc?.stdout) return;
+  if (!handle?.proc?.stdout || !adapter) return;
 
   let buffer = "";
   handle.proc.stdout.on("data", (chunk: Buffer) => {
@@ -126,7 +218,7 @@ function attachProcessListeners(
         db.prepare(
           "UPDATE sessions SET cli_session_id = ?, updated_at = datetime('now') WHERE id = ?",
         ).run(event.sessionId, sessionId);
-        managed.handle.cliSessionId = event.sessionId as string;
+        if (managed.handle) managed.handle.cliSessionId = event.sessionId as string;
       }
 
       const serverEvent: ServerEvent = { ...event, seq } as any;
@@ -162,14 +254,11 @@ function attachProcessListeners(
 
   handle.proc.on("close", (code) => {
     if (isOneShot) {
-      // One-shot process (codex): normal exit without turn_complete means the
-      // turn finished without a structured completion event. Check current status.
       const db = getDb();
       const session = db
         .prepare("SELECT status FROM sessions WHERE id = ?")
         .get(sessionId) as any;
 
-      // Only mark stopped if still running (turn_complete/error didn't fire)
       if (session?.status === "running") {
         if (code === 0) {
           completeTurn(sessionId);
@@ -193,10 +282,6 @@ function attachProcessListeners(
       }
       handle.proc = null;
     } else {
-      // Persistent process (claude): closing means the session is done.
-      // Remove managed session so a new one is created on next connect.
-      // If a turn was in flight when the persistent process died, also notify
-      // the user — they were probably waiting for output that will never come.
       const db = getDb();
       const sess = db
         .prepare("SELECT status FROM sessions WHERE id = ?")
@@ -224,30 +309,55 @@ export function sendPrompt(
   sessionId: string,
   content: string,
 ): { ok: boolean; error?: string } {
-  // Guard against overlapping prompts
   const db = getDb();
   const session = db
     .prepare("SELECT status FROM sessions WHERE id = ?")
     .get(sessionId) as any;
 
-  if (session?.status === "running") {
+  if (
+    session?.status === "running" ||
+    hasRunningTurn(sessionId) ||
+    managed.codexStopRequested
+  ) {
     return { ok: false, error: "Session is already running" };
   }
 
-  // Create turn
-  const turnSeq = getNextTurnSeq(sessionId);
-  const turnId = nanoid();
-  db.prepare(
-    "INSERT INTO turns (id, session_id, seq, status) VALUES (?, ?, ?, 'running')",
-  ).run(turnId, sessionId, turnSeq);
+  const turnId = createRunningTurn(sessionId, content);
 
-  persistMessage(sessionId, "user", content, turnId);
+  const slashContent = content.trimStart();
+  if (slashContent.startsWith("/")) {
+    updateSessionStatus(sessionId, "running");
+    broadcastEvent(managed, {
+      type: "status",
+      status: "running",
+      seq: nextSeq(managed),
+    });
+    if (managed.runtime === "codex-app-server") {
+      void handleSlashCommand(managed, sessionId, turnId, slashContent);
+    } else {
+      void handleNonCodexSlashCommand(managed, sessionId, turnId, slashContent);
+    }
+    return { ok: true };
+  }
+
   updateSessionStatus(sessionId, "running");
+  broadcastEvent(managed, {
+    type: "status",
+    status: "running",
+    seq: nextSeq(managed),
+  });
 
-  const seq = nextSeq(managed);
-  broadcastEvent(managed, { type: "status", status: "running", seq });
+  if (managed.runtime === "codex-app-server") {
+    void startCodexTurn(managed, sessionId, content);
+    return { ok: true };
+  }
 
-  // Both Claude and Codex are one-shot-per-turn: startTurn spawns a new process.
+  if (!managed.adapter || !managed.handle) {
+    failTurn(sessionId);
+    updateSessionStatus(sessionId, "error");
+    return { ok: false, error: "Session runtime is not available" };
+  }
+
   managed.adapter.startTurn(managed.handle, content);
 
   if (managed.handle.proc) {
@@ -257,13 +367,1056 @@ export function sendPrompt(
   return { ok: true };
 }
 
+async function startCodexTurn(
+  managed: ManagedSession,
+  sessionId: string,
+  content: string,
+) {
+  try {
+    const client = await getCodexAppServerClient();
+    if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+
+    const result = await client.request("turn/start", {
+      threadId: managed.codexThreadId,
+      input: [{ type: "text", text: content, text_elements: [] }],
+    });
+    const turnId = result?.turn?.id ?? managed.codexActiveTurnId ?? null;
+    if (turnId && managed.codexStopRequested) {
+      managed.codexStoppingTurnId = turnId;
+      await interruptCodexTurn(managed, turnId);
+      return;
+    }
+    if (getSessionStatus(sessionId) === "running") {
+      managed.codexActiveTurnId = turnId;
+    }
+  } catch (err) {
+    if (
+      managed.codexStopRequested ||
+      getSessionStatus(sessionId) === "stopped" ||
+      !hasRunningTurn(sessionId)
+    ) {
+      managed.codexStopRequested = false;
+      managed.codexActiveTurnId = null;
+      return;
+    }
+    failTurn(sessionId);
+    updateSessionStatus(sessionId, "error");
+    const message = err instanceof Error ? err.message : "Failed to start Codex turn";
+    broadcastEvent(managed, {
+      type: "error",
+      message,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "error",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "error");
+  }
+}
+
 export function stopSession(managed: ManagedSession, sessionId: string) {
-  managed.adapter.stopTurn(managed.handle);
+  const localTurnIsRunning =
+    hasRunningTurn(sessionId) || getSessionStatus(sessionId) === "running";
+  if (!localTurnIsRunning) {
+    return;
+  }
+
+  if (managed.runtime === "codex-app-server") {
+    const threadId = managed.codexThreadId;
+    const turnId = managed.codexActiveTurnId;
+    managed.codexActiveTurnId = null;
+    managed.codexStopRequested = true;
+    managed.codexStoppingTurnId = turnId ?? null;
+    if (threadId && turnId) {
+      void interruptCodexTurn(managed, turnId);
+    }
+  } else if (managed.adapter && managed.handle) {
+    managed.adapter.stopTurn(managed.handle);
+  }
+
   stopTurn(sessionId);
   updateSessionStatus(sessionId, "stopped");
   const seq = nextSeq(managed);
   broadcastEvent(managed, { type: "status", status: "stopped", seq });
   notifyTurnTerminated(sessionId, "stopped");
+}
+
+function handleCodexAppServerMessage(
+  managed: ManagedSession,
+  sessionId: string,
+  message: AppServerMessage,
+) {
+  const method = message.method;
+  const params = message.params ?? {};
+
+  if (
+    method?.startsWith("item/") &&
+    (managed.codexStopRequested || !hasRunningTurn(sessionId))
+  ) {
+    return;
+  }
+
+  if (method === "item/agentMessage/delta") {
+    broadcastEvent(managed, {
+      type: "text_delta",
+      text: String(params.delta ?? ""),
+      seq: nextSeq(managed),
+    });
+    return;
+  }
+
+  if (method === "turn/started") {
+    if (params.turn?.id) {
+      if (managed.codexStopRequested) {
+        managed.codexStoppingTurnId = params.turn.id;
+        void interruptCodexTurn(managed, params.turn.id);
+        return;
+      }
+      if (getSessionStatus(sessionId) === "running") {
+        managed.codexActiveTurnId = params.turn.id;
+      }
+    }
+    return;
+  }
+
+  if (method === "item/started") {
+    const toolUse = normalizeToolUse(params.item);
+    if (toolUse) {
+      broadcastEvent(managed, {
+        type: "tool_use",
+        tool: toolUse.tool,
+        input: toolUse.input,
+        seq: nextSeq(managed),
+      });
+    }
+    return;
+  }
+
+  if (method === "item/completed") {
+    const item = params.item;
+    if (item?.type === "agentMessage") {
+      const content = String(item.text ?? "");
+      persistMessage(sessionId, "assistant", content);
+      broadcastEvent(managed, {
+        type: "message_complete",
+        role: "assistant",
+        content,
+        seq: nextSeq(managed),
+      });
+    }
+    return;
+  }
+
+  if (method === "turn/completed") {
+    if (!hasRunningTurn(sessionId)) {
+      managed.codexActiveTurnId = null;
+      managed.codexStopRequested = false;
+      managed.codexStoppingTurnId = null;
+      return;
+    }
+    completeCodexTurnFromNotification(managed, sessionId, params.turn);
+    return;
+  }
+
+  if (method === "thread/compacted") {
+    if (!hasRunningTurn(sessionId)) {
+      managed.codexActiveTurnId = null;
+      managed.codexStopRequested = false;
+      managed.codexStoppingTurnId = null;
+      return;
+    }
+    managed.codexActiveTurnId = null;
+    managed.codexStopRequested = false;
+    managed.codexStoppingTurnId = null;
+    completeTurn(sessionId);
+    updateSessionStatus(sessionId, "idle");
+    broadcastEvent(managed, {
+      type: "turn_complete",
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "idle",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "complete");
+    return;
+  }
+
+  if (method === "error") {
+    const errMessage = String(params.message ?? "Codex app-server error");
+    failTurn(sessionId);
+    updateSessionStatus(sessionId, "error");
+    managed.codexActiveTurnId = null;
+    managed.codexStopRequested = false;
+    managed.codexStoppingTurnId = null;
+    broadcastEvent(managed, {
+      type: "error",
+      message: errMessage,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "error",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "error");
+    if (params.localFatal) {
+      removeManaged(sessionId);
+    }
+  }
+}
+
+async function interruptCodexTurn(managed: ManagedSession, turnId: string) {
+  if (!managed.codexThreadId) return;
+  try {
+    const client = await getCodexAppServerClient();
+    await client.request("turn/interrupt", {
+      threadId: managed.codexThreadId,
+      turnId,
+    });
+  } catch {
+    // Stop is best-effort. The local Cockpit state has already moved to
+    // stopped, and a late completion notification is ignored when no running
+    // Cockpit turn remains.
+  } finally {
+    // Do not clear codexStopRequested here. It is a guard that prevents a new
+    // prompt from starting on the same app-server thread until the terminal
+    // turn/completed notification arrives (or a local slash command observes
+    // that its Cockpit turn was stopped).
+  }
+}
+
+function normalizeToolUse(item: any): { tool: string; input: unknown } | null {
+  switch (item?.type) {
+    case "commandExecution":
+      return {
+        tool: "command",
+        input: { command: item.command, cwd: item.cwd },
+      };
+    case "fileChange":
+      return { tool: "fileChange", input: { changes: item.changes } };
+    case "mcpToolCall":
+      return {
+        tool: `${item.server ?? "mcp"}/${item.tool ?? "tool"}`,
+        input: item.arguments ?? {},
+      };
+    case "dynamicToolCall":
+      return {
+        tool: item.namespace ? `${item.namespace}/${item.tool}` : item.tool ?? "tool",
+        input: item.arguments ?? {},
+      };
+    case "webSearch":
+      return { tool: "webSearch", input: { query: item.query } };
+    case "contextCompaction":
+      return { tool: "contextCompaction", input: { status: "inProgress" } };
+    case "enteredReviewMode":
+      return { tool: "review", input: { status: "entered" } };
+    case "exitedReviewMode":
+      return { tool: "review", input: { status: "exited" } };
+    default:
+      return null;
+  }
+}
+
+function completeCodexTurnFromNotification(
+  managed: ManagedSession,
+  sessionId: string,
+  turn: any,
+) {
+  const status = turn?.status;
+  managed.codexActiveTurnId = null;
+  managed.codexStopRequested = false;
+  managed.codexStoppingTurnId = null;
+
+  if (status === "completed") {
+    completeTurn(sessionId);
+    updateSessionStatus(sessionId, "idle");
+    broadcastEvent(managed, {
+      type: "turn_complete",
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "idle",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "complete");
+    return;
+  }
+
+  if (status === "interrupted") {
+    stopTurn(sessionId);
+    updateSessionStatus(sessionId, "stopped");
+    broadcastEvent(managed, {
+      type: "turn_complete",
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "stopped",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "stopped");
+    return;
+  }
+
+  failTurn(sessionId);
+  updateSessionStatus(sessionId, "error");
+  const message = turn?.error?.message ?? "Codex turn failed";
+  broadcastEvent(managed, {
+    type: "error",
+    message,
+    seq: nextSeq(managed),
+  });
+  broadcastEvent(managed, {
+    type: "status",
+    status: "error",
+    seq: nextSeq(managed),
+  });
+  notifyTurnTerminated(sessionId, "error");
+}
+
+async function handleSlashCommand(
+  managed: ManagedSession,
+  sessionId: string,
+  turnId: string,
+  content: string,
+) {
+  try {
+    const result = await runSlashCommand(managed, sessionId, content);
+    if (!isTurnRunning(turnId) || getSessionStatus(sessionId) !== "running") {
+      managed.codexStopRequested = false;
+      managed.codexStoppingTurnId = null;
+      return;
+    }
+
+    if (result.type === "codex-turn") {
+      if (result.codexTurnId) {
+        if (managed.codexStopRequested) {
+          managed.codexStoppingTurnId = result.codexTurnId;
+          await interruptCodexTurn(managed, result.codexTurnId);
+          return;
+        }
+        managed.codexActiveTurnId = result.codexTurnId;
+      }
+      return;
+    }
+
+    const reply = result.content;
+    persistMessage(sessionId, "assistant", reply, turnId);
+    completeTurn(sessionId);
+    updateSessionStatus(sessionId, "idle");
+    broadcastEvent(managed, {
+      type: "status",
+      status: "idle",
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "message_complete",
+      role: "assistant",
+      content: reply,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "turn_complete",
+      seq: nextSeq(managed),
+    });
+  } catch (err) {
+    if (!isTurnRunning(turnId) || getSessionStatus(sessionId) === "stopped") {
+      managed.codexStopRequested = false;
+      managed.codexStoppingTurnId = null;
+      return;
+    }
+    const message = err instanceof Error ? err.message : "Slash command failed";
+    persistMessage(sessionId, "assistant", `Slash command failed: ${message}`, turnId);
+    failTurn(sessionId);
+    updateSessionStatus(sessionId, "error");
+    broadcastEvent(managed, {
+      type: "error",
+      message,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "error",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "error");
+  }
+}
+
+async function handleNonCodexSlashCommand(
+  managed: ManagedSession,
+  sessionId: string,
+  turnId: string,
+  content: string,
+) {
+  try {
+    const reply = await runNonCodexSlashCommand(managed, sessionId, content);
+    if (!isTurnRunning(turnId) || getSessionStatus(sessionId) !== "running") {
+      return;
+    }
+    persistMessage(sessionId, "assistant", reply, turnId);
+    completeTurn(sessionId);
+    updateSessionStatus(sessionId, "idle");
+    broadcastEvent(managed, {
+      type: "status",
+      status: "idle",
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "message_complete",
+      role: "assistant",
+      content: reply,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "turn_complete",
+      seq: nextSeq(managed),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Slash command failed";
+    persistMessage(sessionId, "assistant", `Slash command failed: ${message}`, turnId);
+    failTurn(sessionId);
+    updateSessionStatus(sessionId, "error");
+    broadcastEvent(managed, {
+      type: "error",
+      message,
+      seq: nextSeq(managed),
+    });
+    broadcastEvent(managed, {
+      type: "status",
+      status: "error",
+      seq: nextSeq(managed),
+    });
+    notifyTurnTerminated(sessionId, "error");
+  }
+}
+
+async function runNonCodexSlashCommand(
+  managed: ManagedSession,
+  sessionId: string,
+  content: string,
+): Promise<string> {
+  const trimmed = content.trim();
+  const [command] = trimmed.split(/\s+/, 1);
+  const definition = findSlashCommandDefinition(command.toLowerCase());
+  const canonical = definition?.command ?? command.toLowerCase();
+
+  switch (canonical) {
+    case "/help":
+      return slashHelp();
+    case "/status":
+      return slashBasicStatus(sessionId);
+    case "/model":
+      return slashModels();
+    case "/mcp":
+      return slashMcp(trimmed.slice(command.length).trim());
+    case "/diff":
+      return slashDiff(sessionId);
+    case "/debug-config":
+      return slashDebugConfig(managed, sessionId);
+    case "/experimental":
+      return slashExperimental();
+    case "/skills":
+      return slashSkills(sessionId);
+    case "/hooks":
+      return slashHooks(sessionId);
+    case "/apps":
+      return slashApps(managed);
+    case "/plugins":
+      return slashPlugins(sessionId);
+    case "/rename":
+      return slashRenameCockpitOnly(sessionId, trimmed.slice(command.length).trim());
+    default:
+      if (definition) {
+        return [
+          `\`${definition.command}\` is a native Codex slash command, but this session is not running on the Codex app-server runtime.`,
+          "",
+          "Agent Cockpit recognized the command and did not forward it to the model. Switch this session to Codex to use Codex-native slash commands.",
+        ].join("\n");
+      }
+      return `${unsupportedSlash(content)}\n\n${slashHelp()}`;
+  }
+}
+
+type SlashCommandResult =
+  | { type: "message"; content: string }
+  | { type: "codex-turn"; codexTurnId?: string | null };
+
+async function runSlashCommand(
+  managed: ManagedSession,
+  sessionId: string,
+  content: string,
+): Promise<SlashCommandResult> {
+  const trimmed = content.trim();
+  const [command] = trimmed.split(/\s+/, 1);
+  const normalized = command.toLowerCase();
+  const args = trimmed.slice(command.length).trim();
+  const definition = findSlashCommandDefinition(normalized);
+  const canonical = definition?.command ?? normalized;
+
+  switch (canonical) {
+    case "/help":
+      return messageResult(slashHelp());
+    case "/status":
+      return messageResult(await slashStatus(managed, sessionId));
+    case "/model":
+      return messageResult(await slashModels());
+    case "/mcp":
+      return messageResult(await slashMcp(args));
+    case "/diff":
+      return messageResult(await slashDiff(sessionId));
+    case "/debug-config":
+      return messageResult(await slashDebugConfig(managed, sessionId));
+    case "/experimental":
+      return messageResult(await slashExperimental());
+    case "/skills":
+      return messageResult(await slashSkills(sessionId));
+    case "/hooks":
+      return messageResult(await slashHooks(sessionId));
+    case "/apps":
+      return messageResult(await slashApps(managed));
+    case "/plugins":
+      return messageResult(await slashPlugins(sessionId));
+    case "/rename":
+      return messageResult(await slashRename(managed, sessionId, args));
+    case "/goal":
+      return messageResult(await slashGoal(managed, args));
+    case "/review":
+      return slashReview(managed, args);
+    case "/compact":
+      return slashCompact(managed);
+    case "/stop":
+      return messageResult(await slashStopBackgroundTerminals(managed));
+    default:
+      if (definition) {
+        return messageResult(recognizedNativeSlash(definition.command));
+      }
+      return messageResult(`${unsupportedSlash(content)}\n\n${slashHelp()}`);
+  }
+}
+
+function messageResult(content: string): SlashCommandResult {
+  return { type: "message", content };
+}
+
+function slashHelp(): string {
+  const supportLabel = {
+    local: "Cockpit",
+    "codex-app-server": "Codex",
+    recognized: "recognized",
+  } as const;
+  const categories = [
+    "workflow",
+    "session",
+    "configuration",
+    "information",
+    "integration",
+    "ui",
+    "debug",
+  ] as const;
+
+  return [
+    "## Slash commands",
+    "",
+    "Agent Cockpit recognizes the native Codex slash-command catalog. Commands marked `Codex` start the matching app-server operation; commands marked `recognized` are TUI/desktop-only today and are not sent to the model by accident.",
+    "",
+    ...categories.flatMap((category) => {
+      const commands = SLASH_COMMANDS.filter((command) => command.category === category);
+      if (!commands.length) return [];
+      return [
+        `### ${category}`,
+        "",
+        ...commands.map((command) => {
+          const aliases = command.aliases?.length
+            ? ` (${command.aliases.join(", ")})`
+            : "";
+          return `- \`${command.command}\`${aliases} — ${command.description} _${supportLabel[command.support]}_`;
+        }),
+        "",
+      ];
+    }),
+  ].join("\n");
+}
+
+function unsupportedSlash(content: string): string {
+  const command = content.trim().split(/\s+/, 1)[0] || "/";
+  return `Unsupported slash command: \`${command}\`.`;
+}
+
+function recognizedNativeSlash(command: string): string {
+  return [
+    `\`${command}\` is a native Codex slash command and Agent Cockpit now recognizes it.`,
+    "",
+    "This command depends on Codex TUI/desktop UI state that Cockpit does not expose yet, so it was not forwarded to the model. Use `/help` to see which commands are currently mapped to Cockpit or Codex app-server operations.",
+  ].join("\n");
+}
+
+function optionalNativeCommandUnavailable(command: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return [
+    `\`${command}\` is a native Codex slash command, but this Codex app-server does not expose the matching API in the currently installed version.`,
+    "",
+    `App-server response: ${message}`,
+  ].join("\n");
+}
+
+async function slashStatus(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<string> {
+  const db = getDb();
+  const session = db
+    .prepare(
+      `SELECT agent, cwd, status, cli_session_id as cliSessionId, updated_at as updatedAt
+       FROM sessions WHERE id = ?`,
+    )
+    .get(sessionId) as any;
+  const client = await getCodexAppServerClient();
+  const [accountResult, modelsResult] = await Promise.allSettled([
+    client.request("account/read", { refreshToken: false }),
+    client.request("model/list", { limit: 20, includeHidden: false }),
+  ]);
+
+  const defaultModel =
+    modelsResult.status === "fulfilled"
+      ? (modelsResult.value?.data ?? []).find((m: any) => m.isDefault) ??
+        (modelsResult.value?.data ?? [])[0]
+      : null;
+  const account = accountResult.status === "fulfilled" ? accountResult.value?.account : null;
+
+  return [
+    "## Status",
+    "",
+    `- Cockpit session: \`${sessionId}\``,
+    `- Agent: \`${session?.agent ?? "unknown"}\``,
+    `- Cockpit status: \`${session?.status ?? "unknown"}\``,
+    `- Codex thread: \`${managed.codexThreadId ?? session?.cliSessionId ?? "unknown"}\``,
+    `- CWD: \`${session?.cwd ?? "repo default"}\``,
+    defaultModel
+      ? `- Default model: \`${defaultModel.displayName ?? defaultModel.id}\``
+      : "- Default model: unavailable",
+    account?.type
+      ? `- Auth: \`${account.type}\`${account.planType ? ` (${account.planType})` : ""}`
+      : "- Auth: unavailable",
+    `- Updated: ${session?.updatedAt ?? "unknown"}`,
+  ].join("\n");
+}
+
+function slashBasicStatus(sessionId: string): string {
+  const session = getDb()
+    .prepare(
+      `SELECT agent, cwd, status, cli_session_id as cliSessionId, updated_at as updatedAt
+       FROM sessions WHERE id = ?`,
+    )
+    .get(sessionId) as any;
+
+  return [
+    "## Status",
+    "",
+    `- Cockpit session: \`${sessionId}\``,
+    `- Agent: \`${session?.agent ?? "unknown"}\``,
+    `- Cockpit status: \`${session?.status ?? "unknown"}\``,
+    `- CLI session: \`${session?.cliSessionId ?? "unknown"}\``,
+    `- CWD: \`${session?.cwd ?? "repo default"}\``,
+    `- Updated: ${session?.updatedAt ?? "unknown"}`,
+  ].join("\n");
+}
+
+async function slashModels(): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("model/list", {
+    limit: 50,
+    includeHidden: false,
+  });
+  const models = result?.data ?? [];
+  if (!models.length) return "No visible Codex models returned by app-server.";
+
+  return [
+    "## Visible Codex models",
+    "",
+    ...models.map((model: any) => {
+      const markers = [
+        model.isDefault ? "default" : null,
+        model.defaultReasoningEffort ? `effort: ${model.defaultReasoningEffort}` : null,
+      ].filter(Boolean);
+      return `- \`${model.displayName ?? model.id}\` (${model.id})${
+        markers.length ? ` — ${markers.join(", ")}` : ""
+      }`;
+    }),
+  ].join("\n");
+}
+
+async function slashMcp(args = ""): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("mcpServerStatus/list", {
+    limit: 50,
+    detail: args.trim().toLowerCase() === "verbose" ? "tools" : "toolsAndAuthOnly",
+  });
+  const servers = result?.data ?? [];
+  if (!servers.length) return "No MCP servers returned by app-server.";
+
+  return [
+    "## MCP servers",
+    "",
+    ...servers.flatMap((server: any) => {
+      const toolCount = Array.isArray(server.tools) ? server.tools.length : 0;
+      const status = server.status ?? server.startupStatus ?? "unknown";
+      const line = `- \`${server.name ?? "unnamed"}\` — ${status}, ${toolCount} tools`;
+      if (args.trim().toLowerCase() !== "verbose" || !toolCount) return [line];
+      return [
+        line,
+        ...server.tools.map((tool: any) => `  - \`${tool.name ?? tool}\``),
+      ];
+    }),
+  ].join("\n");
+}
+
+async function slashDiff(sessionId: string): Promise<string> {
+  const cwd = getSessionCwd(sessionId);
+  const [status, unstaged, staged] = await Promise.all([
+    runGit(cwd, ["status", "--short"]),
+    runGit(cwd, ["diff", "--stat"]),
+    runGit(cwd, ["diff", "--cached", "--stat"]),
+  ]);
+
+  return [
+    "## Git diff",
+    "",
+    `- CWD: \`${cwd}\``,
+    "",
+    "### Status",
+    "",
+    codeBlock(status || "No changed files."),
+    "",
+    "### Unstaged diff stat",
+    "",
+    codeBlock(unstaged || "No unstaged diff."),
+    "",
+    "### Staged diff stat",
+    "",
+    codeBlock(staged || "No staged diff."),
+  ].join("\n");
+}
+
+async function slashDebugConfig(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<string> {
+  const status = await slashStatus(managed, sessionId);
+  const client = await getCodexAppServerClient();
+  const config = await client.request("config/read", {
+    cwd: getSessionCwd(sessionId),
+  });
+  return [
+    status,
+    "",
+    "## Config",
+    "",
+    codeBlock(JSON.stringify(config, null, 2), "json"),
+  ].join("\n");
+}
+
+async function slashExperimental(): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("experimentalFeature/list", { limit: 50 });
+  const features = result?.data ?? [];
+  if (!features.length) return "No experimental features returned by app-server.";
+  return [
+    "## Experimental features",
+    "",
+    ...features.map((feature: any) => {
+      const enabled = feature.enabled ? "enabled" : "disabled";
+      const stage = feature.stage ? `, ${feature.stage}` : "";
+      return `- \`${feature.name}\` — ${enabled}${stage}${
+        feature.description ? ` — ${feature.description}` : ""
+      }`;
+    }),
+  ].join("\n");
+}
+
+async function slashSkills(sessionId: string): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("skills/list", {
+    cwds: [getSessionCwd(sessionId)],
+    forceReload: false,
+  });
+  const skills = result?.data ?? [];
+  if (!skills.length) return "No skills returned by app-server.";
+  return [
+    "## Skills",
+    "",
+    ...skills.slice(0, 80).map((skill: any) => {
+      const name = skill.name ?? skill.id ?? skill.path ?? "unnamed";
+      const source = skill.source ? ` — ${skill.source}` : "";
+      return `- \`${name}\`${source}`;
+    }),
+  ].join("\n");
+}
+
+async function slashHooks(sessionId: string): Promise<string> {
+  const client = await getCodexAppServerClient();
+  let result: any;
+  try {
+    result = await client.request("hooks/list", {
+      cwds: [getSessionCwd(sessionId)],
+    });
+  } catch (err) {
+    return optionalNativeCommandUnavailable("/hooks", err);
+  }
+  const hooks = result?.data ?? [];
+  if (!hooks.length) return "No hooks returned by app-server.";
+  return [
+    "## Hooks",
+    "",
+    ...hooks.map((hook: any) => `- \`${hook.name ?? hook.event ?? "hook"}\``),
+  ].join("\n");
+}
+
+async function slashApps(managed: ManagedSession): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("app/list", {
+    limit: 50,
+    threadId: managed.codexThreadId ?? null,
+    forceRefetch: false,
+  });
+  const apps = result?.data ?? [];
+  if (!apps.length) return "No apps returned by app-server.";
+  return [
+    "## Apps",
+    "",
+    ...apps.map((app: any) => {
+      const status = app.authStatus ?? app.status ?? (app.connected ? "connected" : "available");
+      return `- \`${app.name ?? app.displayName ?? app.id ?? "unnamed"}\` — ${status}`;
+    }),
+  ].join("\n");
+}
+
+async function slashPlugins(sessionId: string): Promise<string> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("plugin/list", {
+    cwds: [getSessionCwd(sessionId)],
+  });
+  const marketplaces = result?.marketplaces ?? [];
+  if (!marketplaces.length) return "No plugin marketplaces returned by app-server.";
+  return [
+    "## Plugins",
+    "",
+    ...marketplaces.flatMap((marketplace: any) => {
+      const plugins = marketplace.plugins ?? marketplace.entries ?? [];
+      const title = `- ${marketplace.name ?? marketplace.path ?? "marketplace"} — ${plugins.length} plugins`;
+      return [
+        title,
+        ...plugins
+          .slice(0, 20)
+          .map((plugin: any) => `  - \`${plugin.name ?? plugin.id ?? "plugin"}\``),
+      ];
+    }),
+  ].join("\n");
+}
+
+async function slashRename(
+  managed: ManagedSession,
+  sessionId: string,
+  name: string,
+): Promise<string> {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    return "Usage: `/rename <thread name>`";
+  }
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  await client.request("thread/name/set", {
+    threadId: managed.codexThreadId,
+    name: trimmedName,
+  });
+  getDb()
+    .prepare("UPDATE sessions SET name = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(trimmedName, sessionId);
+  return `Renamed current thread to **${trimmedName}**.`;
+}
+
+function slashRenameCockpitOnly(sessionId: string, name: string): string {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    return "Usage: `/rename <session name>`";
+  }
+  getDb()
+    .prepare("UPDATE sessions SET name = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(trimmedName, sessionId);
+  return `Renamed current Cockpit session to **${trimmedName}**.`;
+}
+
+async function slashGoal(managed: ManagedSession, args: string): Promise<string> {
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  const trimmed = args.trim();
+
+  try {
+    if (!trimmed) {
+      const result = await client.request("thread/goal/get", {
+        threadId: managed.codexThreadId,
+      });
+      const goal = result?.goal;
+      if (!goal) {
+        return "No goal is set. Use `/goal <objective>` to set one.";
+      }
+      return [
+        "## Goal",
+        "",
+        `- Objective: ${goal.objective}`,
+        `- Status: \`${goal.status ?? "unknown"}\``,
+        goal.tokenBudget ? `- Token budget: ${goal.tokenBudget}` : null,
+        typeof goal.tokensUsed === "number" ? `- Tokens used: ${goal.tokensUsed}` : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+
+    const lowered = trimmed.toLowerCase();
+    if (lowered === "clear") {
+      const result = await client.request("thread/goal/clear", {
+        threadId: managed.codexThreadId,
+      });
+      return result?.cleared ? "Cleared the current goal." : "No goal was set.";
+    }
+
+    if (lowered === "pause" || lowered === "resume") {
+      const status = lowered === "pause" ? "paused" : "active";
+      const result = await client.request("thread/goal/set", {
+        threadId: managed.codexThreadId,
+        status,
+      });
+      return `Goal status is now \`${result?.goal?.status ?? status}\`.`;
+    }
+
+    const result = await client.request("thread/goal/set", {
+      threadId: managed.codexThreadId,
+      objective: trimmed,
+      status: "active",
+    });
+    return `Set goal: **${result?.goal?.objective ?? trimmed}**.`;
+  } catch (err) {
+    return optionalNativeCommandUnavailable("/goal", err);
+  }
+}
+
+async function slashReview(
+  managed: ManagedSession,
+  args: string,
+): Promise<SlashCommandResult> {
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  const result = await client.request("review/start", {
+    threadId: managed.codexThreadId,
+    target: parseReviewTarget(args),
+  });
+  return { type: "codex-turn", codexTurnId: result?.turn?.id ?? null };
+}
+
+async function slashCompact(managed: ManagedSession): Promise<SlashCommandResult> {
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  await client.request("thread/compact/start", {
+    threadId: managed.codexThreadId,
+  });
+  return { type: "codex-turn" };
+}
+
+async function slashStopBackgroundTerminals(
+  managed: ManagedSession,
+): Promise<string> {
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  await client.request("thread/backgroundTerminals/clean", {
+    threadId: managed.codexThreadId,
+  });
+  return "Requested Codex to stop all background terminals.";
+}
+
+function parseReviewTarget(args: string): any {
+  const trimmed = args.trim();
+  if (!trimmed) return { type: "uncommittedChanges" };
+
+  const baseMatch = trimmed.match(/^(?:base|--base|-b)\s+(.+)$/i);
+  if (baseMatch?.[1]) {
+    return { type: "baseBranch", branch: baseMatch[1].trim() };
+  }
+
+  const commitMatch = trimmed.match(/^(?:commit|--commit)\s+([^\s]+)(?:\s+(.+))?$/i);
+  if (commitMatch?.[1]) {
+    return {
+      type: "commit",
+      sha: commitMatch[1],
+      title: commitMatch[2]?.trim() || null,
+    };
+  }
+
+  return { type: "custom", instructions: trimmed };
+}
+
+function getSessionCwd(sessionId: string): string {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT COALESCE(s.cwd, r.path) as cwd
+       FROM sessions s
+       JOIN repos r ON r.id = s.repo_id
+       WHERE s.id = ?`,
+    )
+    .get(sessionId) as { cwd?: string } | undefined;
+  return row?.cwd ?? process.cwd();
+}
+
+async function runGit(cwd: string, args: string): Promise<string>;
+async function runGit(cwd: string, args: string[]): Promise<string>;
+async function runGit(cwd: string, args: string | string[]): Promise<string> {
+  try {
+    const { stdout, stderr } = await execFileAsync("git", Array.isArray(args) ? args : [args], {
+      cwd,
+      maxBuffer: 1024 * 1024,
+    });
+    return (stdout || stderr).trim();
+  } catch (err: any) {
+    return String(err?.stdout || err?.stderr || err?.message || "git command failed").trim();
+  }
+}
+
+function codeBlock(content: string, language = ""): string {
+  return [`\`\`\`${language}`, content.replace(/```/g, "`\u200b``"), "```"].join("\n");
+}
+
+function createRunningTurn(sessionId: string, content: string): string {
+  const db = getDb();
+  const turnSeq = getNextTurnSeq(sessionId);
+  const turnId = nanoid();
+  db.prepare(
+    "INSERT INTO turns (id, session_id, seq, status) VALUES (?, ?, ?, 'running')",
+  ).run(turnId, sessionId, turnSeq);
+  persistMessage(sessionId, "user", content, turnId);
+  return turnId;
+}
+
+function reconcileCodexThreadStatus(
+  sessionId: string,
+  threadStatusType: string | null,
+) {
+  if (threadStatusType !== "idle") return;
+  if (getSessionStatus(sessionId) !== "running" || !hasRunningTurn(sessionId)) {
+    return;
+  }
+
+  // The app-server thread is already idle, but Cockpit still has a running
+  // turn. This can happen when the local server restarts or previously closes
+  // the WebSocket before observing the terminal turn notification. Mark the
+  // local turn complete so reconnecting clients do not get stuck in a
+  // permanent "running/connecting" state.
+  completeTurn(sessionId);
+  updateSessionStatus(sessionId, "idle");
 }
 
 function getNextTurnSeq(sessionId: string): number {
@@ -323,12 +1476,33 @@ function failTurn(sessionId: string) {
   ).run(sessionId);
 }
 
+function hasRunningTurn(sessionId: string): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT id FROM turns WHERE session_id = ? AND status = 'running' ORDER BY seq DESC LIMIT 1",
+    )
+    .get(sessionId);
+  return Boolean(row);
+}
+
+function isTurnRunning(turnId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT id FROM turns WHERE id = ? AND status = 'running'")
+    .get(turnId);
+  return Boolean(row);
+}
+
 function updateSessionStatus(sessionId: string, status: SessionStatus) {
   const db = getDb();
   db.prepare(
     "UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?",
   ).run(status, sessionId);
-  // Broadcast to lobby listeners (cross-session). This is the single
-  // funnel point for all status transitions in session-bridge.
   broadcastLobby({ type: "session_status", sessionId, status });
+}
+
+function getSessionStatus(sessionId: string): SessionStatus | null {
+  const row = getDb()
+    .prepare("SELECT status FROM sessions WHERE id = ?")
+    .get(sessionId) as { status: SessionStatus } | undefined;
+  return row?.status ?? null;
 }

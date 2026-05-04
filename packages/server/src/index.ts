@@ -23,6 +23,7 @@ import { lobbyRoutes } from "./ws/lobby-handler.js";
 import { cleanupAll } from "./process-manager.js";
 import { initPush } from "./push.js";
 import { initScheduler, stopAllSchedules } from "./scheduler.js";
+import { shutdownCodexAppServerClient } from "./codex/app-server-client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -137,6 +138,7 @@ async function main() {
   const shutdown = () => {
     stopAllSchedules();
     cleanupAll();
+    shutdownCodexAppServerClient();
     closeDb();
     logStream.end();
     process.exit(0);

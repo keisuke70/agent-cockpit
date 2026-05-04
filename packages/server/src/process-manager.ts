@@ -4,8 +4,14 @@ import type { LobbyEvent, ServerEvent } from "@agent-cockpit/shared";
 
 export interface ManagedSession {
   sessionId: string;
-  adapter: CLIAdapter;
-  handle: AdapterHandle;
+  runtime: "cli" | "codex-app-server";
+  adapter?: CLIAdapter;
+  handle?: AdapterHandle;
+  codexThreadId?: string;
+  codexActiveTurnId?: string | null;
+  codexStopRequested?: boolean;
+  codexStoppingTurnId?: string | null;
+  cleanup?: () => void;
   seq: number;
   eventBuffer: ServerEvent[];
   listeners: Set<(event: ServerEvent) => void>;
@@ -29,7 +35,10 @@ export function setManaged(sessionId: string, managed: ManagedSession) {
 export function removeManaged(sessionId: string) {
   const managed = sessions.get(sessionId);
   if (managed) {
-    managed.adapter.dispose(managed.handle);
+    managed.cleanup?.();
+    if (managed.runtime === "cli" && managed.adapter && managed.handle) {
+      managed.adapter.dispose(managed.handle);
+    }
     managed.listeners.clear();
     sessions.delete(sessionId);
   }

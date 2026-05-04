@@ -1,0 +1,365 @@
+export type SlashCommandCategory =
+  | "workflow"
+  | "session"
+  | "configuration"
+  | "information"
+  | "integration"
+  | "ui"
+  | "debug";
+
+export type SlashCommandSupport =
+  | "local"
+  | "codex-app-server"
+  | "recognized";
+
+export interface SlashCommandDefinition {
+  command: string;
+  description: string;
+  aliases?: string[];
+  category: SlashCommandCategory;
+  support: SlashCommandSupport;
+  supportsInlineArgs?: boolean;
+}
+
+// Mirrors Codex CLI's built-in slash-command catalog, with Agent Cockpit-only
+// aliases kept next to the native command they map to.
+export const SLASH_COMMANDS: SlashCommandDefinition[] = [
+  {
+    command: "/help",
+    description: "Show supported Agent Cockpit and native Codex slash commands.",
+    aliases: ["/h"],
+    category: "information",
+    support: "local",
+  },
+  {
+    command: "/model",
+    description: "Choose what model and reasoning effort to use.",
+    aliases: ["/models"],
+    category: "configuration",
+    support: "local",
+  },
+  {
+    command: "/provider",
+    description: "Choose the model provider.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/reason",
+    description: "Choose reasoning effort.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/fast",
+    description: "Toggle Fast mode for fastest inference with increased plan usage.",
+    category: "configuration",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/ide",
+    description: "Include current selection, open files, and other context from your IDE.",
+    category: "ui",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/permissions",
+    description: "Choose what Codex is allowed to do.",
+    aliases: ["/approval", "/approvals"],
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/keymap",
+    description: "Remap TUI shortcuts.",
+    category: "ui",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/vim",
+    description: "Toggle Vim mode for the composer.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/setup-default-sandbox",
+    description: "Set up elevated agent sandbox.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/sandbox-add-read-dir",
+    description: "Let sandbox read a directory: /sandbox-add-read-dir <absolute_path>.",
+    category: "configuration",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/experimental",
+    description: "List experimental features visible to Codex.",
+    category: "configuration",
+    support: "local",
+  },
+  {
+    command: "/approve",
+    description: "Approve one retry of a recent auto-review denial.",
+    category: "workflow",
+    support: "recognized",
+  },
+  {
+    command: "/memories",
+    description: "Configure memory use and generation.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/skills",
+    description: "List skills Codex can use for specific tasks.",
+    aliases: ["/use"],
+    category: "integration",
+    support: "local",
+  },
+  {
+    command: "/hooks",
+    description: "View lifecycle hooks configured for Codex.",
+    category: "integration",
+    support: "local",
+  },
+  {
+    command: "/review",
+    description: "Review current changes and find issues.",
+    aliases: ["/r"],
+    category: "workflow",
+    support: "codex-app-server",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/rename",
+    description: "Rename the current thread.",
+    category: "session",
+    support: "local",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/new",
+    description: "Start a new chat during a conversation.",
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/resume",
+    description: "Resume a saved chat.",
+    category: "session",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/sessions",
+    description: "Browse saved chats.",
+    aliases: ["/history"],
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/fork",
+    description: "Fork the current chat.",
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/init",
+    description: "Create an AGENTS.md file with instructions for Codex.",
+    category: "workflow",
+    support: "recognized",
+  },
+  {
+    command: "/compact",
+    description: "Summarize conversation to prevent hitting the context limit.",
+    category: "session",
+    support: "codex-app-server",
+  },
+  {
+    command: "/undo",
+    description: "Undo the latest turn.",
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/plan",
+    description: "Switch to Plan mode.",
+    category: "workflow",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/goal",
+    description: "Set or view the goal for a long-running task.",
+    category: "workflow",
+    support: "codex-app-server",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/collab",
+    description: "Change collaboration mode (experimental).",
+    category: "workflow",
+    support: "recognized",
+  },
+  {
+    command: "/agent",
+    description: "Switch the active agent thread.",
+    aliases: ["/subagents"],
+    category: "workflow",
+    support: "recognized",
+  },
+  {
+    command: "/side",
+    description: "Start a side conversation in an ephemeral fork.",
+    category: "workflow",
+    support: "recognized",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/copy",
+    description: "Copy last response as markdown.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/diff",
+    description: "Show git diff summary, including untracked files.",
+    category: "information",
+    support: "local",
+  },
+  {
+    command: "/mention",
+    description: "Mention a file.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/status",
+    description: "Show current session configuration and token usage.",
+    aliases: ["/s"],
+    category: "information",
+    support: "local",
+  },
+  {
+    command: "/debug-config",
+    description: "Show config layers and requirement sources for debugging.",
+    category: "debug",
+    support: "local",
+  },
+  {
+    command: "/title",
+    description: "Configure which items appear in the terminal title.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/statusline",
+    description: "Configure which items appear in the status line.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/theme",
+    description: "Choose a syntax highlighting theme.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/mcp",
+    description: "List configured MCP tools; use /mcp verbose for details.",
+    category: "integration",
+    support: "local",
+    supportsInlineArgs: true,
+  },
+  {
+    command: "/apps",
+    description: "Manage apps.",
+    category: "integration",
+    support: "local",
+  },
+  {
+    command: "/plugins",
+    description: "Browse plugins.",
+    category: "integration",
+    support: "local",
+  },
+  {
+    command: "/logout",
+    description: "Log out of Codex.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/quit",
+    description: "Exit Codex.",
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/exit",
+    description: "Exit Codex.",
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/feedback",
+    description: "Send logs to maintainers.",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/ps",
+    description: "List background terminals.",
+    category: "information",
+    support: "recognized",
+  },
+  {
+    command: "/stop",
+    description: "Stop all background terminals.",
+    aliases: ["/clean"],
+    category: "workflow",
+    support: "codex-app-server",
+  },
+  {
+    command: "/clear",
+    description: "Clear the terminal and start a new chat.",
+    aliases: ["/c"],
+    category: "session",
+    support: "recognized",
+  },
+  {
+    command: "/personality",
+    description: "Choose a communication style for Codex.",
+    category: "configuration",
+    support: "recognized",
+  },
+  {
+    command: "/realtime",
+    description: "Toggle realtime voice mode (experimental).",
+    category: "ui",
+    support: "recognized",
+  },
+  {
+    command: "/settings",
+    description: "Configure realtime microphone/speaker.",
+    category: "ui",
+    support: "recognized",
+  },
+];
+
+export function findSlashCommandDefinition(
+  commandOrAlias: string,
+): SlashCommandDefinition | undefined {
+  const normalized = commandOrAlias.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  if (!normalized?.startsWith("/")) return undefined;
+  return SLASH_COMMANDS.find(
+    (command) =>
+      command.command === normalized || command.aliases?.includes(normalized),
+  );
+}
