@@ -89,4 +89,5 @@
 - 実装修正が一区切りついたら、ユーザーへ完了報告する前に repo ルートで必ず `npm run deploy` を実行する
 - `npm run deploy` は build → launchd restart → health check をまとめて行う
 - これを省略すると、スマホ/PWA/Tailscale 経由では古い server process を掴んだままになり、追加した API が `404 Not Found` になることがある
+- Agent Cockpit 自身のチャットから `npm run deploy` を実行すると、launchd restart によりそのチャット接続は一度切れる。deploy 後の完了報告では「少し待ってからスマホ/PWAをリロードすると反映される」と明示する
 - まだ実装途中で頻繁に変更している段階では毎回 deploy しなくてよい。ユーザーが動作確認できる一区切りで実行する
