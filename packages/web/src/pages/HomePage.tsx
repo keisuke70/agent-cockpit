@@ -5,12 +5,14 @@ import type {
   Session,
   SessionStatus,
   AgentType,
+  WorkspaceSettings,
 } from "@agent-cockpit/shared";
 import { authHeaders } from "../hooks/useAuth.js";
 import { usePushSubscription } from "../hooks/usePushSubscription.js";
 import { useLobby } from "../hooks/useLobby.js";
 import { RepoAgentSelector, ALL_REPOS } from "../components/RepoAgentSelector.js";
 import { SessionList } from "../components/SessionList.js";
+import { sessionDisplayName } from "../sessionDisplay.js";
 
 type StatusFilter = "all" | "running" | "idle" | "error";
 
@@ -35,7 +37,7 @@ export function HomePage() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState(
-    () => localStorage.getItem("cockpit-selected-repo") ?? "",
+    () => localStorage.getItem("cockpit-selected-repo") ?? ALL_REPOS,
   );
   const [selectedAgent, setSelectedAgent] = useState<AgentType>(() => {
     const stored = localStorage.getItem("cockpit-selected-agent");
@@ -44,6 +46,13 @@ export function HomePage() {
   const [showAddRepo, setShowAddRepo] = useState(false);
   const [repoName, setRepoName] = useState("");
   const [repoPath, setRepoPath] = useState("");
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>({
+    rootPath: null,
+    workspaceRepoId: null,
+  });
+  const [workspaceRootInput, setWorkspaceRootInput] = useState("");
+  const [workspaceRootError, setWorkspaceRootError] = useState("");
+  const [isSavingWorkspaceRoot, setIsSavingWorkspaceRoot] = useState(false);
   const push = usePushSubscription();
   const liveStatuses = useLobby();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -51,6 +60,7 @@ export function HomePage() {
     () => new Set(),
   );
   const [deleteSessionError, setDeleteSessionError] = useState("");
+  const [newSessionError, setNewSessionError] = useState("");
 
   const isAllRepos = selectedRepoId === ALL_REPOS;
   const isSpecificRepo = selectedRepoId !== "" && !isAllRepos;
@@ -58,8 +68,11 @@ export function HomePage() {
   const repoNames = useMemo(() => {
     const map = new Map<string, string>();
     for (const r of repos) map.set(r.id, r.name);
+    if (workspaceSettings.workspaceRepoId) {
+      map.set(workspaceSettings.workspaceRepoId, "Workspace Root");
+    }
     return map;
-  }, [repos]);
+  }, [repos, workspaceSettings.workspaceRepoId]);
 
   // effectiveStatus = live status from lobby if available, else the persisted
   // status from the last fetch. Filtering uses this so the chip filters reflect
@@ -73,6 +86,7 @@ export function HomePage() {
 
   const handleRepoChange = useCallback((id: string) => {
     setSelectedRepoId(id);
+    setNewSessionError("");
     localStorage.setItem("cockpit-selected-repo", id);
   }, []);
 
@@ -81,20 +95,29 @@ export function HomePage() {
     localStorage.setItem("cockpit-selected-agent", agent);
   }, []);
 
+  const fetchWorkspaceSettings = useCallback(async () => {
+    const res = await fetch("/api/settings/workspace-root", {
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setWorkspaceRootError(body.error ?? `Workspace root unavailable (${res.status})`);
+      return;
+    }
+    const data = (await res.json()) as WorkspaceSettings;
+    setWorkspaceSettings(data);
+    setWorkspaceRootInput(data.rootPath ?? "");
+  }, []);
+
   const fetchRepos = useCallback(async () => {
     const res = await fetch("/api/repos", { headers: authHeaders() });
     const data = (await res.json()) as Repo[];
     setRepos(data);
 
-    if (data.length === 0) {
-      if (selectedRepoId) handleRepoChange("");
-      return;
-    }
-
     const selectedExists =
       selectedRepoId === ALL_REPOS || data.some((repo) => repo.id === selectedRepoId);
     if (!selectedRepoId || !selectedExists) {
-      handleRepoChange(data[0].id);
+      handleRepoChange(data[0]?.id ?? ALL_REPOS);
     }
   }, [handleRepoChange, selectedRepoId]);
 
@@ -108,6 +131,10 @@ export function HomePage() {
   }, [selectedRepoId, isAllRepos]);
 
   useEffect(() => {
+    fetchWorkspaceSettings();
+  }, [fetchWorkspaceSettings]);
+
+  useEffect(() => {
     fetchRepos();
   }, [fetchRepos]);
 
@@ -116,20 +143,44 @@ export function HomePage() {
   }, [fetchSessions]);
 
   async function createSession() {
-    if (!isSpecificRepo) return;
-    const res = await fetch("/api/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ repoId: selectedRepoId, agent: selectedAgent }),
-    });
-    const session = await res.json();
-    navigate(`/session/${session.id}`);
+    const repoId = isAllRepos ? workspaceSettings.workspaceRepoId : selectedRepoId;
+    const cwd = isAllRepos ? workspaceSettings.rootPath : null;
+    if (!repoId || (!isAllRepos && !isSpecificRepo)) return;
+
+    setNewSessionError("");
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          repoId,
+          agent: selectedAgent,
+          ...(cwd ? { cwd } : {}),
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setNewSessionError(body.error ?? `Session creation failed (${res.status})`);
+        if (isAllRepos) fetchWorkspaceSettings();
+        return;
+      }
+
+      const session = await res.json();
+      if (!session.id) {
+        setNewSessionError("Session creation returned no session id.");
+        return;
+      }
+      navigate(`/session/${session.id}`);
+    } catch (err) {
+      setNewSessionError(err instanceof Error ? err.message : "Session creation failed");
+    }
   }
 
   async function deleteSessionFromList(session: Session) {
     if (deletingSessionIds.has(session.id)) return;
 
-    const label = session.name || `Session ${session.id.slice(0, 8)}`;
+    const label = sessionDisplayName(session);
     const confirmed = confirm(
       `Delete "${label}"? This removes its messages and schedules.`,
     );
@@ -170,6 +221,38 @@ export function HomePage() {
 
   const [addRepoError, setAddRepoError] = useState("");
 
+  async function saveWorkspaceRoot() {
+    const rootPath = workspaceRootInput.trim();
+    if (!rootPath || isSavingWorkspaceRoot) return;
+
+    setWorkspaceRootError("");
+    setIsSavingWorkspaceRoot(true);
+    try {
+      const res = await fetch("/api/settings/workspace-root", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ rootPath }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setWorkspaceRootError(body.error ?? `Error ${res.status}`);
+        return;
+      }
+
+      const data = (await res.json()) as WorkspaceSettings;
+      setWorkspaceSettings(data);
+      setWorkspaceRootInput(data.rootPath ?? "");
+      setWorkspaceRootError("");
+      setNewSessionError("");
+      fetchRepos();
+    } catch (err) {
+      setWorkspaceRootError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setIsSavingWorkspaceRoot(false);
+    }
+  }
+
   async function addRepo() {
     if (!repoName.trim() || !repoPath.trim()) return;
     setAddRepoError("");
@@ -199,10 +282,19 @@ export function HomePage() {
       method: "DELETE",
       headers: authHeaders(),
     });
-    handleRepoChange("");
+    handleRepoChange(ALL_REPOS);
     setSessions([]);
     fetchRepos();
   }
+
+  const canCreateSession =
+    isSpecificRepo ||
+    (isAllRepos && Boolean(workspaceSettings.rootPath && workspaceSettings.workspaceRepoId));
+  const newSessionLabel = isAllRepos
+    ? workspaceSettings.rootPath
+      ? "New Workspace Session"
+      : "Set root directory to create a session"
+    : "New Session";
 
   return (
     <>
@@ -243,6 +335,15 @@ export function HomePage() {
         </div>
       </header>
 
+      <WorkspaceRootSettings
+        rootPath={workspaceSettings.rootPath}
+        value={workspaceRootInput}
+        error={workspaceRootError}
+        saving={isSavingWorkspaceRoot}
+        onChange={setWorkspaceRootInput}
+        onSave={saveWorkspaceRoot}
+      />
+
       {showAddRepo && (
         <div
           style={{
@@ -253,16 +354,28 @@ export function HomePage() {
             gap: 8,
           }}
         >
-          <input
-            placeholder="Repo name"
-            value={repoName}
-            onChange={(e) => setRepoName(e.target.value)}
-          />
-          <input
-            placeholder="Mac local path (e.g. /Users/kei/projects/myapp)"
-            value={repoPath}
-            onChange={(e) => setRepoPath(e.target.value)}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label htmlFor="repo-name" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              Repo name
+            </label>
+            <input
+              id="repo-name"
+              placeholder="myapp"
+              value={repoName}
+              onChange={(e) => setRepoName(e.target.value)}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label htmlFor="repo-path" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              Local path
+            </label>
+            <input
+              id="repo-path"
+              placeholder="/path/to/your/repo"
+              value={repoPath}
+              onChange={(e) => setRepoPath(e.target.value)}
+            />
+          </div>
           {addRepoError && (
             <span style={{ fontSize: 13, color: "var(--danger)" }}>{addRepoError}</span>
           )}
@@ -318,29 +431,127 @@ export function HomePage() {
       </div>
 
       <div style={{ padding: "12px 16px", paddingBottom: "calc(12px + var(--safe-bottom))" }} data-section="new-session">
+        {newSessionError && (
+          <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 8px" }}>
+            {newSessionError}
+          </p>
+        )}
         <button
           onClick={createSession}
-          disabled={!isSpecificRepo}
+          disabled={!canCreateSession}
           style={{
             width: "100%",
             padding: "12px",
-            background: isSpecificRepo ? "var(--accent)" : "var(--bg-surface)",
-            color: isSpecificRepo ? "white" : "var(--text-muted)",
+            background: canCreateSession ? "var(--accent)" : "var(--bg-surface)",
+            color: canCreateSession ? "white" : "var(--text-muted)",
             borderRadius: "var(--radius-sm)",
             fontWeight: 600,
             fontSize: 16,
             minHeight: 48,
           }}
           title={
-            isAllRepos
-              ? "Pick a specific repo to create a new session"
+            isAllRepos && !workspaceSettings.rootPath
+              ? "Set a workspace root directory before creating an All Repos session"
               : undefined
           }
         >
-          {isAllRepos ? "Pick a repo to create a session" : "New Session"}
+          {newSessionLabel}
         </button>
       </div>
     </>
+  );
+}
+
+function WorkspaceRootSettings({
+  rootPath,
+  value,
+  error,
+  saving,
+  onChange,
+  onSave,
+}: {
+  rootPath: string | null;
+  value: string;
+  error: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onSave: () => void;
+}) {
+  const trimmed = value.trim();
+  const unchanged = trimmed === (rootPath ?? "");
+  const hintId = "workspace-root-hint";
+  const errorId = "workspace-root-error";
+
+  function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!trimmed || unchanged || saving) return;
+    onSave();
+  }
+
+  return (
+    <section
+      aria-labelledby="workspace-root-heading"
+      style={{
+        padding: "12px 16px",
+        borderBottom: "1px solid var(--border)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <h2 id="workspace-root-heading" style={{ fontSize: 14, fontWeight: 650 }}>
+          Workspace root
+        </h2>
+        <p id={hintId} style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
+          Choose the parent folder that contains your repositories. All Repos sessions start here.
+        </p>
+      </div>
+      <form
+        onSubmit={handleSubmit}
+        style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
+      >
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+          <label
+            htmlFor="workspace-root-path"
+            style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}
+          >
+            Root directory path
+          </label>
+          <input
+            id="workspace-root-path"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder="~/Projects"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            aria-describedby={error ? `${hintId} ${errorId}` : hintId}
+            aria-invalid={Boolean(error)}
+            style={{ width: "100%", minHeight: 44 }}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={!trimmed || unchanged || saving}
+          style={{
+            minHeight: 44,
+            padding: "10px 14px",
+            borderRadius: "var(--radius-sm)",
+            background: !trimmed || unchanged || saving ? "var(--bg-surface)" : "var(--accent)",
+            color: !trimmed || unchanged || saving ? "var(--text-muted)" : "white",
+            fontWeight: 600,
+          }}
+        >
+          {saving ? "Saving..." : rootPath ? "Update root" : "Set root"}
+        </button>
+      </form>
+      {error && (
+        <p id={errorId} role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -15,7 +15,11 @@ interface UseWebSocketResult {
   /** Live raw stdout buffer for the embedded terminal Debug view. */
   rawStdout: string;
   status: SessionStatus | "connecting";
+  sessionName: string | null | undefined;
+  syncingMessages: boolean;
+  syncError: string;
   sendPrompt: (text: string) => void;
+  syncMessages: () => void;
   stop: () => void;
   retry: () => void;
 }
@@ -29,6 +33,9 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   const [activeTools, setActiveTools] = useState<ToolActivity[]>([]);
   const [rawStdout, setRawStdout] = useState("");
   const [status, setStatus] = useState<SessionStatus | "connecting">("connecting");
+  const [sessionName, setSessionName] = useState<string | null | undefined>(undefined);
+  const [syncingMessages, setSyncingMessages] = useState(false);
+  const [syncError, setSyncError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -71,6 +78,19 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           setStreamingText("");
           lastSeqRef.current = event.lastSeq;
           setStatus(event.status);
+          setSessionName(event.sessionName);
+          setSyncingMessages(false);
+          break;
+
+        case "messages_synced":
+          setMessages(event.messages);
+          setSyncingMessages(false);
+          setSyncError("");
+          break;
+
+        case "messages_sync_failed":
+          setSyncingMessages(false);
+          setSyncError(event.message);
           break;
 
         case "text_delta":
@@ -100,6 +120,12 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           }
           break;
 
+        case "session_updated":
+          if (event.sessionId === sessionId) {
+            setSessionName(event.name);
+          }
+          break;
+
         case "tool_use":
           setActiveTools((prev) => [
             ...prev,
@@ -108,6 +134,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           break;
 
         case "error":
+          setSyncingMessages(false);
           setStatus("error");
           break;
 
@@ -147,6 +174,9 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     setActiveTools([]);
     setRawStdout("");
     setStatus("connecting");
+    setSessionName(undefined);
+    setSyncingMessages(false);
+    setSyncError("");
 
     connect();
     return () => {
@@ -188,6 +218,14 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     }
   }, []);
 
+  const syncMessages = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    setSyncingMessages(true);
+    setSyncError("");
+    ws.send(JSON.stringify({ type: "sync_messages" }));
+  }, []);
+
   const retry = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -209,5 +247,18 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
-  return { messages, streamingText, activeTools, rawStdout, status, sendPrompt, stop, retry };
+  return {
+    messages,
+    streamingText,
+    activeTools,
+    rawStdout,
+    status,
+    sessionName,
+    syncingMessages,
+    sendPrompt,
+    syncMessages,
+    syncError,
+    stop,
+    retry,
+  };
 }

@@ -10,6 +10,7 @@ import { StreamOutput } from "../components/StreamOutput.js";
 import { TerminalView } from "../components/TerminalView.js";
 import { Composer } from "../components/Composer.js";
 import { SchedulePanel } from "../components/SchedulePanel.js";
+import { sessionDisplayName } from "../sessionDisplay.js";
 
 type ViewMode = "chat" | "debug";
 
@@ -17,8 +18,20 @@ export function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const session = useSession(id!);
-  const { messages, streamingText, activeTools, rawStdout, status, sendPrompt, stop, retry } =
-    useWebSocket(id!);
+  const {
+    messages,
+    streamingText,
+    activeTools,
+    rawStdout,
+    status,
+    sessionName,
+    syncingMessages,
+    syncError,
+    sendPrompt,
+    syncMessages,
+    stop,
+    retry,
+  } = useWebSocket(id!);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -45,7 +58,12 @@ export function SessionPage() {
     };
   }, [repoSessions, id]);
 
-  const displayName = session?.name || `Session ${id?.slice(0, 8)}`;
+  const displayName =
+    sessionName !== undefined
+      ? sessionDisplayName({ id: id!, name: sessionName })
+      : session
+        ? sessionDisplayName(session)
+        : "Loading session";
   const agent = session?.agent ?? "";
 
   async function deleteSession() {
@@ -79,58 +97,20 @@ export function SessionPage() {
 
   return (
     <>
-      <header
-        style={{
-          padding: "12px 16px",
-          borderBottom: "1px solid var(--border)",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-        }}
-      >
+      <header className="session-header">
         <button
+          className="session-back-button"
           onClick={() => navigate("/")}
-          style={{ fontSize: 20, padding: "4px 8px", minWidth: 44, minHeight: 44 }}
-          aria-label="Back"
+          aria-label="Back to sessions"
         >
           &larr;
         </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontWeight: 600,
-              fontSize: 16,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            {displayName}
-            {agent && (
-              <span
-                style={{
-                  fontSize: 11,
-                  padding: "2px 8px",
-                  borderRadius: 999,
-                  background: "var(--bg-surface)",
-                  border: "1px solid var(--border)",
-                  color: "var(--text-muted)",
-                  fontWeight: 500,
-                }}
-              >
-                {agent}
-              </span>
-            )}
+        <div className="session-heading">
+          <div className="session-title-row">
+            <h1 className="session-title">{displayName}</h1>
+            {agent && <span className="session-agent-pill">{agent}</span>}
           </div>
-          <div
-            style={{
-              fontSize: 13,
-              color: "var(--text-muted)",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
+          <div className="session-meta-row">
             <StatusLabel status={status} />
             {gitStatus && <GitBadge status={gitStatus} />}
             {deleteError && (
@@ -138,8 +118,17 @@ export function SessionPage() {
                 {deleteError}
               </span>
             )}
+            {syncError && (
+              <span role="alert" style={{ color: "var(--danger)" }}>
+                Sync failed: {syncError}
+              </span>
+            )}
           </div>
         </div>
+        <StatusDot status={status} />
+      </header>
+
+      <div className="session-action-bar" role="group" aria-label="Session controls">
         {totalCount > 1 && currentIndex >= 0 && (
           <SessionNavigator
             current={currentIndex + 1}
@@ -154,44 +143,34 @@ export function SessionPage() {
             }}
           />
         )}
+        {session?.agent === "codex" && (
+          <button
+            className="session-chip-button"
+            type="button"
+            onClick={syncMessages}
+            disabled={syncingMessages || status === "connecting" || status === "running"}
+            title="Import missing messages from the Codex thread into this Cockpit transcript"
+          >
+            {syncingMessages ? "Syncing" : "Sync"}
+          </button>
+        )}
         <button
+          className={`session-chip-button ${viewMode === "debug" ? "session-chip-button--active" : ""}`}
           onClick={() => setViewMode(viewMode === "chat" ? "debug" : "chat")}
-          style={{
-            fontSize: 11,
-            padding: "4px 10px",
-            borderRadius: 999,
-            background: viewMode === "debug" ? "var(--accent)" : "var(--bg-surface)",
-            color: viewMode === "debug" ? "white" : "var(--text-muted)",
-            border: "1px solid var(--border)",
-            fontWeight: 600,
-            minHeight: 28,
-          }}
-          aria-label="Toggle Chat / Debug view"
+          aria-pressed={viewMode === "debug"}
           title="Toggle Chat / Debug view (live raw stdout, non-replayable)"
         >
-          {viewMode === "debug" ? "Debug" : "Chat"}
+          {viewMode === "debug" ? "Debug view" : "Chat view"}
         </button>
         <button
+          className="session-chip-button session-chip-button--danger"
           type="button"
           onClick={deleteSession}
           disabled={isDeleting}
-          style={{
-            fontSize: 11,
-            padding: "4px 10px",
-            borderRadius: 999,
-            background: "var(--bg-surface)",
-            color: "var(--danger)",
-            border: "1px solid var(--border)",
-            fontWeight: 600,
-            minHeight: 28,
-            opacity: isDeleting ? 0.5 : 1,
-            cursor: isDeleting ? "default" : "pointer",
-          }}
         >
           {isDeleting ? "Deleting" : "Delete"}
         </button>
-        <StatusDot status={status} />
-      </header>
+      </div>
 
       <SchedulePanel sessionId={id!} />
 
@@ -234,12 +213,7 @@ function SessionNavigator({
   return (
     <nav
       aria-label="Session navigation"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        marginRight: 4,
-      }}
+      className="session-navigator"
     >
       <button
         type="button"
@@ -247,30 +221,13 @@ function SessionNavigator({
         onClick={onNewer}
         aria-label="Newer session"
         title="Newer session"
-        style={{
-          minWidth: 36,
-          minHeight: 36,
-          borderRadius: "50%",
-          border: "1px solid var(--border)",
-          background: "var(--bg-surface)",
-          color: hasNewer ? "var(--text)" : "var(--text-muted)",
-          opacity: hasNewer ? 1 : 0.35,
-          cursor: hasNewer ? "pointer" : "default",
-          fontSize: 18,
-          lineHeight: 1,
-        }}
+        className="session-nav-button"
       >
         ‹
       </button>
       <span
         aria-current="page"
-        style={{
-          fontSize: 12,
-          color: "var(--text-muted)",
-          fontFamily: "ui-monospace, SFMono-Regular, monospace",
-          minWidth: 38,
-          textAlign: "center",
-        }}
+        className="session-nav-count"
         title="Current session position"
       >
         {current}/{total}
@@ -281,18 +238,7 @@ function SessionNavigator({
         onClick={onOlder}
         aria-label="Older session"
         title="Older session"
-        style={{
-          minWidth: 36,
-          minHeight: 36,
-          borderRadius: "50%",
-          border: "1px solid var(--border)",
-          background: "var(--bg-surface)",
-          color: hasOlder ? "var(--text)" : "var(--text-muted)",
-          opacity: hasOlder ? 1 : 0.35,
-          cursor: hasOlder ? "pointer" : "default",
-          fontSize: 18,
-          lineHeight: 1,
-        }}
+        className="session-nav-button"
       >
         ›
       </button>
@@ -325,7 +271,7 @@ function GitBadge({ status }: { status: GitStatus }) {
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
-        maxWidth: 200,
+        maxWidth: "100%",
       }}
       title={label}
     >
@@ -361,12 +307,10 @@ function StatusDot({ status }: { status: string }) {
 
   return (
     <span
+      aria-hidden="true"
+      className="session-status-dot"
       style={{
-        width: 10,
-        height: 10,
-        borderRadius: "50%",
         background: color,
-        flexShrink: 0,
         ...(status === "running" || status === "connecting"
           ? { animation: "blink 1.5s ease-in-out infinite" }
           : {}),

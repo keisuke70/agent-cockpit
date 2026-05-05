@@ -5,6 +5,7 @@ import {
   SLASH_COMMANDS,
   findSlashCommandDefinition,
   type AgentType,
+  type Message,
   type ServerEvent,
   type SessionStatus,
 } from "@agent-cockpit/shared";
@@ -28,6 +29,7 @@ import {
 } from "../process-manager.js";
 
 const execFileAsync = promisify(execFile);
+const AUTO_TITLE_MAX_LENGTH = 48;
 
 /**
  * Shared termination notification helper. Called from every code path that
@@ -183,6 +185,143 @@ async function ensureCodexAppServerManaged(opts: {
   return managed;
 }
 
+export async function syncCodexThreadMessages(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<{ importedCount: number; messages: Message[] }> {
+  if (managed.runtime !== "codex-app-server" || !managed.codexThreadId) {
+    throw new Error("Sync is only available for Codex sessions.");
+  }
+
+  const client = await getCodexAppServerClient();
+  const result = await client.request("thread/read", {
+    threadId: managed.codexThreadId,
+    includeTurns: true,
+  });
+  const turns = Array.isArray(result?.thread?.turns) ? result.thread.turns : [];
+  let importedCount = 0;
+
+  for (const turn of turns) {
+    const turnTimestamp = sqliteTimestampFromUnixSeconds(
+      turn?.completedAt ?? turn?.startedAt ?? null,
+    );
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    for (const item of items) {
+      const extracted = messageFromThreadItem(item);
+      if (!extracted) continue;
+      const externalId = `${managed.codexThreadId}:${turn.id}:${item.id}`;
+      if (upsertExternalMessage(
+        sessionId,
+        extracted.role,
+        extracted.content,
+        externalId,
+        turnTimestamp,
+      )) {
+        importedCount += 1;
+      }
+    }
+  }
+
+  if (importedCount > 0) {
+    getDb()
+      .prepare("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?")
+      .run(sessionId);
+  }
+
+  const messages = listSessionMessages(sessionId);
+  broadcastEvent(managed, {
+    type: "messages_synced",
+    messages,
+    importedCount,
+    seq: nextSeq(managed),
+  });
+
+  return { importedCount, messages };
+}
+
+function messageFromThreadItem(
+  item: any,
+): { role: "user" | "assistant"; content: string } | null {
+  if (item?.type === "userMessage") {
+    const content = Array.isArray(item.content)
+      ? item.content
+          .map((part: any) => {
+            if (part?.type === "text") return String(part.text ?? "");
+            if (part?.type === "image") return `[image: ${part.url ?? ""}]`;
+            if (part?.type === "localImage") return `[local image: ${part.path ?? ""}]`;
+            if (part?.type === "skill") return `[$${part.name ?? "skill"}]`;
+            if (part?.type === "mention") return `[@${part.name ?? "mention"}]`;
+            return "";
+          })
+          .filter(Boolean)
+          .join("\n")
+          .trim()
+      : "";
+    return content ? { role: "user", content } : null;
+  }
+
+  if (item?.type === "agentMessage") {
+    const content = String(item.text ?? "").trim();
+    return content ? { role: "assistant", content } : null;
+  }
+
+  return null;
+}
+
+function upsertExternalMessage(
+  sessionId: string,
+  role: "user" | "assistant",
+  content: string,
+  externalId: string,
+  createdAt: string | null,
+): boolean {
+  const db = getDb();
+  const existingExternal = db
+    .prepare("SELECT id FROM messages WHERE session_id = ? AND external_id = ?")
+    .get(sessionId, externalId);
+  if (existingExternal) return false;
+
+  const existingLocal = db
+    .prepare(
+      `SELECT id FROM messages
+       WHERE session_id = ? AND role = ? AND content = ? AND external_id IS NULL
+       ORDER BY created_at ASC LIMIT 1`,
+    )
+    .get(sessionId, role, content) as { id: string } | undefined;
+
+  if (existingLocal) {
+    db.prepare("UPDATE messages SET external_id = ? WHERE id = ?").run(
+      externalId,
+      existingLocal.id,
+    );
+    return false;
+  }
+
+  const id = nanoid();
+  db.prepare(
+    `INSERT INTO messages (id, session_id, turn_id, role, content, external_id, created_at)
+     VALUES (?, ?, NULL, ?, ?, ?, COALESCE(?, datetime('now')))`,
+  ).run(id, sessionId, role, content, externalId, createdAt);
+  return true;
+}
+
+function sqliteTimestampFromUnixSeconds(value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const date = new Date(value * 1000);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function listSessionMessages(sessionId: string): Message[] {
+  return getDb()
+    .prepare(
+      `SELECT id, session_id as sessionId, turn_id as turnId, role, content,
+              created_at as createdAt
+       FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
+    )
+    .all(sessionId) as Message[];
+}
+
 function attachProcessListeners(
   managed: ManagedSession,
   sessionId: string,
@@ -325,6 +464,10 @@ export function sendPrompt(
   const turnId = createRunningTurn(sessionId, content);
 
   const slashContent = content.trimStart();
+  if (!slashContent.startsWith("/")) {
+    maybeAutoTitleSession(managed, sessionId, content);
+  }
+
   if (slashContent.startsWith("/")) {
     updateSessionStatus(sessionId, "running");
     broadcastEvent(managed, {
@@ -498,7 +641,10 @@ function handleCodexAppServerMessage(
     const item = params.item;
     if (item?.type === "agentMessage") {
       const content = String(item.text ?? "");
-      persistMessage(sessionId, "assistant", content);
+      const externalId = managed.codexThreadId && params.turnId && item.id
+        ? `${managed.codexThreadId}:${params.turnId}:${item.id}`
+        : undefined;
+      persistMessage(sessionId, "assistant", content, undefined, externalId);
       broadcastEvent(managed, {
         type: "message_complete",
         role: "assistant",
@@ -1685,6 +1831,56 @@ function formatUpdated(value: string): string {
   });
 }
 
+
+function maybeAutoTitleSession(
+  managed: ManagedSession,
+  sessionId: string,
+  content: string,
+) {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT name FROM sessions WHERE id = ?")
+    .get(sessionId) as { name: string | null } | undefined;
+
+  if (row?.name?.trim()) return;
+
+  const title = createTitleFromPrompt(content);
+  if (!title) return;
+
+  db.prepare("UPDATE sessions SET name = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(title, sessionId);
+
+  broadcastEvent(managed, {
+    type: "session_updated",
+    sessionId,
+    name: title,
+    seq: nextSeq(managed),
+  });
+}
+
+function createTitleFromPrompt(content: string): string {
+  const firstMeaningfulLine = content
+    .replace(/```[\s\S]*?```/g, " ")
+    .split(/\r?\n/)
+    .map((line) =>
+      line
+        .replace(/^\s{0,3}(?:#{1,6}|[-*+]|\d+[.)]|>)\s+/u, "")
+        .replace(/[`*_~[\]()]/g, "")
+        .replace(/https?:\/\/\S+/g, "")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .find(Boolean);
+
+  if (!firstMeaningfulLine) return "";
+
+  if ([...firstMeaningfulLine].length <= AUTO_TITLE_MAX_LENGTH) {
+    return firstMeaningfulLine;
+  }
+
+  return [...firstMeaningfulLine].slice(0, AUTO_TITLE_MAX_LENGTH - 1).join("").trimEnd() + "…";
+}
+
 function createRunningTurn(sessionId: string, content: string): string {
   const db = getDb();
   const turnSeq = getNextTurnSeq(sessionId);
@@ -1727,6 +1923,7 @@ function persistMessage(
   role: string,
   content: string,
   turnId?: string,
+  externalId?: string,
 ) {
   const db = getDb();
   const id = nanoid();
@@ -1741,9 +1938,17 @@ function persistMessage(
     )?.id ??
     null;
 
+  if (externalId) {
+    const existing = db
+      .prepare("SELECT id FROM messages WHERE session_id = ? AND external_id = ?")
+      .get(sessionId, externalId);
+    if (existing) return;
+  }
+
   db.prepare(
-    "INSERT INTO messages (id, session_id, turn_id, role, content) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, sessionId, resolvedTurnId, role, content);
+    `INSERT INTO messages (id, session_id, turn_id, role, content, external_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, sessionId, resolvedTurnId, role, content, externalId ?? null);
 }
 
 function completeTurn(sessionId: string, cost?: number) {

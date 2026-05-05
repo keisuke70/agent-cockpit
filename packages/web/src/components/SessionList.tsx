@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router";
 import type { Session, SessionStatus } from "@agent-cockpit/shared";
+import { sessionAccessibleLabel, sessionDisplayName, sessionTimestampLabel } from "../sessionDisplay.js";
 
 interface SessionListProps {
   sessions: Session[];
@@ -55,7 +56,8 @@ export function SessionList({
       {sessions.map((s) => {
         const effectiveStatus = liveStatuses?.get(s.id) ?? s.status;
         const repoName = repoNames?.get(s.repoId);
-        const label = s.name || `Session ${s.id.slice(0, 8)}`;
+        const label = sessionDisplayName(s);
+        const updatedLabel = sessionTimestampLabel(s.updatedAt);
         const isDeleting = deletingSessionIds?.has(s.id) ?? false;
         return (
           <li
@@ -73,6 +75,7 @@ export function SessionList({
             <button
               type="button"
               onClick={() => navigate(`/session/${s.id}`)}
+              aria-label={sessionAccessibleLabel(s, repoName)}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -136,7 +139,7 @@ export function SessionList({
                   )}
                   <span>{s.agent}</span>
                   <span>&middot;</span>
-                  <span>{new Date(s.updatedAt).toLocaleString()}</span>
+                  <span>{updatedLabel}</span>
                 </div>
               </div>
             </button>

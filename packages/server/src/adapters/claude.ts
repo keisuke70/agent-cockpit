@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { CLIAdapter, AdapterHandle, NormalizedEvent } from "./base.js";
 import { makeSpawnEnv } from "./base.js";
 
-const CLAUDE_BIN = "/Users/kei/.local/bin/claude";
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
 /**
  * Claude adapter. Each turn spawns a new `claude --print` process. Multi-turn

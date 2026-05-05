@@ -81,6 +81,12 @@ function migrate(db: Database.Database) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS schedules (
       id          TEXT PRIMARY KEY,
       session_id  TEXT NOT NULL REFERENCES sessions(id),
@@ -98,6 +104,24 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, seq);
   `);
+
+  ensureColumn(db, "messages", "external_id", "TEXT");
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_external
+    ON messages(session_id, external_id)
+    WHERE external_id IS NOT NULL;
+  `);
+}
+
+function ensureColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string,
+) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (columns.some((row) => row.name === column)) return;
+  db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
 }
 
 export function closeDb() {

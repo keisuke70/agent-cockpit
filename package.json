@@ -11,7 +11,9 @@
   "scripts": {
     "dev": "concurrently -n shared,server,web -c magenta,blue,green \"npm run dev -w @agent-cockpit/shared\" \"npm run dev -w @agent-cockpit/server\" \"npm run dev -w @agent-cockpit/web\"",
     "build": "npm run build -w @agent-cockpit/shared && npm run build -w @agent-cockpit/server && npm run build -w @agent-cockpit/web",
-    "typecheck": "tsc --build"
+    "typecheck": "tsc --build",
+    "restart": "bash scripts/restart-launchd.sh",
+    "deploy": "npm run build && npm run restart"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

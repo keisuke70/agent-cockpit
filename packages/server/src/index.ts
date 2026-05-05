@@ -18,6 +18,7 @@ import { repoRoutes } from "./routes/repos.js";
 import { sessionRoutes } from "./routes/sessions.js";
 import { pushRoutes } from "./routes/push.js";
 import { scheduleRoutes } from "./routes/schedules.js";
+import { settingsRoutes } from "./routes/settings.js";
 import { wsRoutes } from "./ws/handler.js";
 import { lobbyRoutes } from "./ws/lobby-handler.js";
 import { cleanupAll } from "./process-manager.js";
@@ -114,6 +115,7 @@ async function main() {
   await app.register(sessionRoutes);
   await app.register(pushRoutes);
   await app.register(scheduleRoutes);
+  await app.register(settingsRoutes);
   await app.register(wsRoutes);
   await app.register(lobbyRoutes);
 

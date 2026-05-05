@@ -4,7 +4,7 @@ export const agentTypeSchema = z.enum(["claude", "codex"]);
 
 export const createRepoSchema = z.object({
   name: z.string().min(1).max(200),
-  path: z.string().min(1),
+  path: z.string().trim().min(1),
 });
 
 export const createSessionSchema = z.object({
@@ -12,4 +12,9 @@ export const createSessionSchema = z.object({
   agent: agentTypeSchema,
   cwd: z.string().nullable().optional(),
   name: z.string().nullable().optional(),
+});
+
+
+export const workspaceRootSchema = z.object({
+  rootPath: z.string().trim().min(1),
 });

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { CLIAdapter, AdapterHandle, NormalizedEvent } from "./base.js";
 import { makeSpawnEnv } from "./base.js";
 
-const CODEX_BIN = "/opt/homebrew/bin/codex";
+const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
 const CODEX_TRUSTED_EXECUTION_ARG = "--dangerously-bypass-approvals-and-sandbox";
 
 export interface CodexHandle extends AdapterHandle {

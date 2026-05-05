@@ -46,11 +46,32 @@ export interface StatusEvent {
   seq: number;
 }
 
+export interface SessionUpdatedEvent {
+  type: "session_updated";
+  sessionId: string;
+  name: string | null;
+  seq: number;
+}
+
 export interface SnapshotEvent {
   type: "snapshot";
   messages: Message[];
   lastSeq: number;
   status: SessionStatus;
+  sessionName: string | null;
+}
+
+export interface MessagesSyncedEvent {
+  type: "messages_synced";
+  messages: Message[];
+  importedCount: number;
+  seq: number;
+}
+
+export interface MessagesSyncFailedEvent {
+  type: "messages_sync_failed";
+  message: string;
+  seq: number;
 }
 
 /**
@@ -73,6 +94,9 @@ export type ServerEvent =
   | TurnCompleteEvent
   | ErrorEvent
   | StatusEvent
+  | SessionUpdatedEvent
+  | MessagesSyncedEvent
+  | MessagesSyncFailedEvent
   | RawStdoutEvent
   | SnapshotEvent;
 
@@ -107,4 +131,12 @@ export interface RetryMessage {
   type: "retry";
 }
 
-export type ClientMessage = SendPromptMessage | StopMessage | RetryMessage;
+export interface SyncMessagesMessage {
+  type: "sync_messages";
+}
+
+export type ClientMessage =
+  | SendPromptMessage
+  | StopMessage
+  | RetryMessage
+  | SyncMessagesMessage;

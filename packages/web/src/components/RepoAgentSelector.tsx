@@ -19,22 +19,33 @@ export function RepoAgentSelector({
   onAgentChange,
 }: RepoAgentSelectorProps) {
   return (
-    <div style={{ display: "flex", gap: 8, padding: "12px 16px" }}>
-      <select
-        value={selectedRepoId}
-        onChange={(e) => onRepoChange(e.target.value)}
-        style={{ flex: 1, minHeight: 44 }}
-      >
-        {repos.length === 0 && <option value="">No repos registered</option>}
-        <option value={ALL_REPOS}>All Repos</option>
-        {repos.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.name}
-          </option>
-        ))}
-      </select>
+    <div style={{ display: "flex", gap: 8, padding: "12px 16px", alignItems: "flex-end" }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <label
+          htmlFor="repo-selector"
+          style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}
+        >
+          Session scope
+        </label>
+        <select
+          id="repo-selector"
+          value={selectedRepoId}
+          onChange={(e) => onRepoChange(e.target.value)}
+          style={{ width: "100%", minHeight: 44 }}
+        >
+          <option value={ALL_REPOS}>All Repos</option>
+          {repos.length === 0 && <option value="" disabled>No repos registered</option>}
+          {repos.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
       <div
+        role="group"
+        aria-label="Agent"
         style={{
           display: "flex",
           border: "1px solid var(--border)",
@@ -45,7 +56,9 @@ export function RepoAgentSelector({
         {(["claude", "codex"] as AgentType[]).map((agent) => (
           <button
             key={agent}
+            type="button"
             onClick={() => onAgentChange(agent)}
+            aria-pressed={selectedAgent === agent}
             style={{
               padding: "8px 14px",
               minHeight: 44,

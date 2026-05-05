@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 
 export interface NormalizedEvent {
@@ -36,8 +38,12 @@ export interface CLIAdapter {
   parseEvent(line: string): NormalizedEvent | null;
 }
 
-/** PATH entries for CLI discovery */
-export const CLI_PATH_PREFIX = "/Users/kei/.local/bin:/opt/homebrew/bin";
+/** PATH entries for CLI discovery. */
+export const CLI_PATH_PREFIX = [
+  join(homedir(), ".local", "bin"),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+].join(":");
 
 export function makeSpawnEnv(): NodeJS.ProcessEnv {
   return {

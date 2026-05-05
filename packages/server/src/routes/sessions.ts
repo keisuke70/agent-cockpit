@@ -4,6 +4,7 @@ import { createSessionSchema } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import { getManaged, removeManaged } from "../process-manager.js";
 import { removeScheduleRunner } from "../scheduler.js";
+import { ensureWorkspaceRepo, getWorkspaceSettings } from "./settings.js";
 
 function detachManagedProcessListeners(sessionId: string) {
   const proc = getManaged(sessionId)?.handle?.proc;
@@ -54,22 +55,34 @@ export async function sessionRoutes(app: FastifyInstance) {
     }
 
     const db = getDb();
+    const workspace = getWorkspaceSettings();
+    if (
+      parsed.data.repoId === workspace.workspaceRepoId &&
+      workspace.rootPath
+    ) {
+      ensureWorkspaceRepo(workspace.rootPath);
+    }
+
     const repo = db.prepare("SELECT id FROM repos WHERE id = ?").get(parsed.data.repoId);
     if (!repo) {
       return reply.status(400).send({ error: "Repo not found" });
     }
 
+    const cwd =
+      parsed.data.cwd ??
+      (parsed.data.repoId === workspace.workspaceRepoId ? workspace.rootPath : null);
+
     const id = nanoid();
     db.prepare(
       `INSERT INTO sessions (id, repo_id, agent, cwd, name)
        VALUES (?, ?, ?, ?, ?)`,
-    ).run(id, parsed.data.repoId, parsed.data.agent, parsed.data.cwd ?? null, parsed.data.name ?? null);
+    ).run(id, parsed.data.repoId, parsed.data.agent, cwd, parsed.data.name ?? null);
 
     return reply.status(201).send({
       id,
       repoId: parsed.data.repoId,
       agent: parsed.data.agent,
-      cwd: parsed.data.cwd ?? null,
+      cwd,
       name: parsed.data.name ?? null,
       status: "idle",
     });

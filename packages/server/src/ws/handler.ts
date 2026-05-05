@@ -6,8 +6,15 @@ import {
   ensureManaged,
   sendPrompt,
   stopSession,
+  syncCodexThreadMessages,
 } from "./session-bridge.js";
-import { getEventsSince, getManaged, type ManagedSession } from "../process-manager.js";
+import {
+  broadcastEvent,
+  getEventsSince,
+  getManaged,
+  nextSeq,
+  type ManagedSession,
+} from "../process-manager.js";
 
 export async function wsRoutes(app: FastifyInstance) {
   app.get(
@@ -104,6 +111,18 @@ export async function wsRoutes(app: FastifyInstance) {
             }
             break;
           }
+          case "sync_messages":
+            try {
+              await syncCodexThreadMessages(current, sessionId!);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "Sync failed";
+              broadcastEvent(current, {
+                type: "messages_sync_failed",
+                message,
+                seq: nextSeq(current),
+              });
+            }
+            break;
         }
       });
 
@@ -130,14 +149,15 @@ function sendSnapshotMsg(socket: WebSocket, sessionId: string, lastSeq: number) 
     .all(sessionId) as Message[];
 
   const session = db
-    .prepare("SELECT status FROM sessions WHERE id = ?")
-    .get(sessionId) as any;
+    .prepare("SELECT status, name FROM sessions WHERE id = ?")
+    .get(sessionId) as { status?: SnapshotEvent["status"]; name?: string | null } | undefined;
 
   const snapshot: SnapshotEvent = {
     type: "snapshot",
     messages,
     lastSeq,
     status: session?.status ?? "idle",
+    sessionName: session?.name ?? null,
   };
 
   socket.send(JSON.stringify(snapshot));

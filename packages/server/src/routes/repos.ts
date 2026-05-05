@@ -5,13 +5,15 @@ import { createRepoSchema } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import { removeManaged } from "../process-manager.js";
 import { getGitStatus } from "../git.js";
+import { WORKSPACE_REPO_ID } from "./settings.js";
+import { normalizeLocalPath } from "../path-utils.js";
 
 export async function repoRoutes(app: FastifyInstance) {
   app.get("/api/repos", () => {
     const db = getDb();
     return db
-      .prepare("SELECT id, name, path, created_at as createdAt FROM repos ORDER BY name")
-      .all();
+      .prepare("SELECT id, name, path, created_at as createdAt FROM repos WHERE id != ? ORDER BY name")
+      .all(WORKSPACE_REPO_ID);
   });
 
   app.post("/api/repos", (req, reply) => {
@@ -19,7 +21,8 @@ export async function repoRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const { name, path } = parsed.data;
+    const { name } = parsed.data;
+    const path = normalizeLocalPath(parsed.data.path);
 
     if (!existsSync(path)) {
       return reply.status(400).send({ error: "Path does not exist" });
@@ -61,6 +64,10 @@ export async function repoRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string } }>("/api/repos/:id", (req, reply) => {
     const db = getDb();
     const repoId = req.params.id;
+
+    if (repoId === WORKSPACE_REPO_ID) {
+      return reply.status(404).send({ error: "Not found" });
+    }
 
     // Cascade delete inside a transaction. Capture the affected session ids
     // so we can tear down their managed processes only after a successful commit.

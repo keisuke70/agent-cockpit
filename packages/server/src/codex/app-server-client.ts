@@ -14,7 +14,7 @@ export interface AppServerMessage {
 
 type ThreadListener = (message: AppServerMessage) => void;
 
-const CODEX_BIN = "/opt/homebrew/bin/codex";
+const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
 
 let singleton: CodexAppServerClient | null = null;
 let singletonInit: Promise<void> | null = null;

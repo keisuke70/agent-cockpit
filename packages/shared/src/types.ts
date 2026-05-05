@@ -15,6 +15,13 @@ export interface Repo {
   createdAt: string;
 }
 
+
+/** Workspace root setting used for cross-repo sessions */
+export interface WorkspaceSettings {
+  rootPath: string | null;
+  workspaceRepoId: string | null;
+}
+
 /** Session record */
 export interface Session {
   id: string;

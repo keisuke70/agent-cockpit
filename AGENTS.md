@@ -79,3 +79,14 @@
 単純な1-2ファイルの修正には不要。
 
 <!-- END SHARED INSTRUCTIONS -->
+
+---
+
+## ローカル運用: 実装完了後の deploy
+
+この repo は launchd で `packages/server/dist/index.js` を常駐起動しているため、`npm run build` だけでは起動中サーバは新しいコードを読み込まない。
+
+- 実装修正が一区切りついたら、ユーザーへ完了報告する前に repo ルートで必ず `npm run deploy` を実行する
+- `npm run deploy` は build → launchd restart → health check をまとめて行う
+- これを省略すると、スマホ/PWA/Tailscale 経由では古い server process を掴んだままになり、追加した API が `404 Not Found` になることがある
+- まだ実装途中で頻繁に変更している段階では毎回 deploy しなくてよい。ユーザーが動作確認できる一区切りで実行する
