@@ -1,6 +1,6 @@
 import type { Repo, AgentType } from "@agent-cockpit/shared";
 
-/** Sentinel value for the "All Repos" cross-repo view. */
+/** Sentinel value for the cross-repo home view and workspace session creation. */
 export const ALL_REPOS = "(all)";
 
 interface RepoAgentSelectorProps {
@@ -25,7 +25,7 @@ export function RepoAgentSelector({
           htmlFor="repo-selector"
           style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}
         >
-          Session scope
+          Session list
         </label>
         <select
           id="repo-selector"
@@ -33,8 +33,8 @@ export function RepoAgentSelector({
           onChange={(e) => onRepoChange(e.target.value)}
           style={{ width: "100%", minHeight: 44 }}
         >
-          <option value={ALL_REPOS}>All Repos</option>
-          {repos.length === 0 && <option value="" disabled>No repos registered</option>}
+          <option value={ALL_REPOS}>All sessions</option>
+          {repos.length === 0 && <option value="" disabled>No pinned repos</option>}
           {repos.map((r) => (
             <option key={r.id} value={r.id}>
               {r.name}

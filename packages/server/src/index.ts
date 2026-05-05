@@ -10,6 +10,7 @@ import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
+import type { FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
@@ -53,6 +54,34 @@ function getOrCreateToken(): { token: string; created: boolean } {
 
 const { token: AUTH_TOKEN, created: TOKEN_FRESHLY_CREATED } = getOrCreateToken();
 export { AUTH_TOKEN };
+
+function markInterruptedWorkStopped(app: FastifyInstance) {
+  const db = getDb();
+  const stoppedTurns = db
+    .prepare(
+      `UPDATE turns
+       SET status = 'stopped', finished_at = COALESCE(finished_at, datetime('now'))
+       WHERE status = 'running'`,
+    )
+    .run();
+  const stoppedSessions = db
+    .prepare(
+      `UPDATE sessions
+       SET status = 'stopped', updated_at = datetime('now')
+       WHERE status = 'running'`,
+    )
+    .run();
+
+  if (stoppedTurns.changes > 0 || stoppedSessions.changes > 0) {
+    app.log.warn(
+      {
+        stoppedTurns: stoppedTurns.changes,
+        stoppedSessions: stoppedSessions.changes,
+      },
+      "Recovered interrupted Agent Cockpit work after server startup",
+    );
+  }
+}
 
 async function main() {
   ensureLogDir();
@@ -103,6 +132,7 @@ async function main() {
 
   // Initialize DB
   getDb();
+  markInterruptedWorkStopped(app);
 
   // Initialize Web Push (loads or generates VAPID keys)
   initPush();

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import type { FormEvent } from "react";
 import { useNavigate } from "react-router";
 import type {
   Repo,
@@ -53,6 +54,7 @@ export function HomePage() {
   const [workspaceRootInput, setWorkspaceRootInput] = useState("");
   const [workspaceRootError, setWorkspaceRootError] = useState("");
   const [isSavingWorkspaceRoot, setIsSavingWorkspaceRoot] = useState(false);
+  const [showWorkspaceSettings, setShowWorkspaceSettings] = useState(false);
   const push = usePushSubscription();
   const liveStatuses = useLobby();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -107,6 +109,7 @@ export function HomePage() {
     const data = (await res.json()) as WorkspaceSettings;
     setWorkspaceSettings(data);
     setWorkspaceRootInput(data.rootPath ?? "");
+    if (!data.rootPath) setShowWorkspaceSettings(true);
   }, []);
 
   const fetchRepos = useCallback(async () => {
@@ -245,6 +248,7 @@ export function HomePage() {
       setWorkspaceRootInput(data.rootPath ?? "");
       setWorkspaceRootError("");
       setNewSessionError("");
+      setShowWorkspaceSettings(false);
       fetchRepos();
     } catch (err) {
       setWorkspaceRootError(err instanceof Error ? err.message : "Save failed");
@@ -295,6 +299,10 @@ export function HomePage() {
       ? "New Workspace Session"
       : "Set root directory to create a session"
     : "New Session";
+  const shouldShowWorkspaceSettings =
+    showWorkspaceSettings ||
+    !workspaceSettings.rootPath ||
+    Boolean(workspaceRootError);
 
   return (
     <>
@@ -323,76 +331,42 @@ export function HomePage() {
             </button>
           )}
           <button
-            onClick={() => setShowAddRepo(!showAddRepo)}
+            onClick={() => setShowWorkspaceSettings((showing) => !showing)}
+            aria-expanded={shouldShowWorkspaceSettings}
+            aria-controls="workspace-settings-panel"
             style={{
               fontSize: 13,
               color: "var(--accent)",
               padding: "6px 12px",
             }}
           >
-            {showAddRepo ? "Cancel" : "+ Repo"}
+            Workspace
           </button>
         </div>
       </header>
 
-      <WorkspaceRootSettings
-        rootPath={workspaceSettings.rootPath}
-        value={workspaceRootInput}
-        error={workspaceRootError}
-        saving={isSavingWorkspaceRoot}
-        onChange={setWorkspaceRootInput}
-        onSave={saveWorkspaceRoot}
-      />
-
-      {showAddRepo && (
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-          }}
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label htmlFor="repo-name" style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              Repo name
-            </label>
-            <input
-              id="repo-name"
-              placeholder="myapp"
-              value={repoName}
-              onChange={(e) => setRepoName(e.target.value)}
-            />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label htmlFor="repo-path" style={{ fontSize: 13, color: "var(--text-muted)" }}>
-              Local path
-            </label>
-            <input
-              id="repo-path"
-              placeholder="/path/to/your/repo"
-              value={repoPath}
-              onChange={(e) => setRepoPath(e.target.value)}
-            />
-          </div>
-          {addRepoError && (
-            <span style={{ fontSize: 13, color: "var(--danger)" }}>{addRepoError}</span>
-          )}
-          <button
-            onClick={addRepo}
-            style={{
-              padding: "10px",
-              background: "var(--accent)",
-              color: "white",
-              borderRadius: "var(--radius-sm)",
-              fontWeight: 600,
-              minHeight: 44,
-            }}
-          >
-            Add Repo
-          </button>
-        </div>
+      {shouldShowWorkspaceSettings ? (
+        <WorkspaceRootSettings
+          rootPath={workspaceSettings.rootPath}
+          value={workspaceRootInput}
+          error={workspaceRootError}
+          saving={isSavingWorkspaceRoot}
+          showAddRepo={showAddRepo}
+          repoName={repoName}
+          repoPath={repoPath}
+          addRepoError={addRepoError}
+          onChange={setWorkspaceRootInput}
+          onSave={saveWorkspaceRoot}
+          onToggleAddRepo={() => setShowAddRepo((showing) => !showing)}
+          onRepoNameChange={setRepoName}
+          onRepoPathChange={setRepoPath}
+          onAddRepo={addRepo}
+        />
+      ) : (
+        <WorkspaceSummary
+          rootPath={workspaceSettings.rootPath}
+          onOpenSettings={() => setShowWorkspaceSettings(true)}
+        />
       )}
 
       <PushSettings push={push} />
@@ -462,51 +436,129 @@ export function HomePage() {
   );
 }
 
+function WorkspaceSummary({
+  rootPath,
+  onOpenSettings,
+}: {
+  rootPath: string | null;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <section
+      aria-label="Workspace setup"
+      style={{
+        padding: "10px 16px",
+        borderBottom: "1px solid var(--border)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 12,
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 650 }}>Workspace sessions</div>
+        <p
+          style={{
+            margin: 0,
+            color: "var(--text-muted)",
+            fontSize: 13,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {rootPath ?? "Set a root folder"} · add repos from inside a session when needed
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        style={{
+          flexShrink: 0,
+          minHeight: 36,
+          padding: "6px 12px",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-sm)",
+          color: "var(--accent)",
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        Change
+      </button>
+    </section>
+  );
+}
+
 function WorkspaceRootSettings({
   rootPath,
   value,
   error,
   saving,
+  showAddRepo,
+  repoName,
+  repoPath,
+  addRepoError,
   onChange,
   onSave,
+  onToggleAddRepo,
+  onRepoNameChange,
+  onRepoPathChange,
+  onAddRepo,
 }: {
   rootPath: string | null;
   value: string;
   error: string;
   saving: boolean;
+  showAddRepo: boolean;
+  repoName: string;
+  repoPath: string;
+  addRepoError: string;
   onChange: (value: string) => void;
   onSave: () => void;
+  onToggleAddRepo: () => void;
+  onRepoNameChange: (value: string) => void;
+  onRepoPathChange: (value: string) => void;
+  onAddRepo: () => void;
 }) {
   const trimmed = value.trim();
   const unchanged = trimmed === (rootPath ?? "");
   const hintId = "workspace-root-hint";
   const errorId = "workspace-root-error";
 
-  function handleSubmit(event: React.FormEvent) {
+  function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!trimmed || unchanged || saving) return;
     onSave();
   }
 
+  function handleManualRepoSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!repoName.trim() || !repoPath.trim()) return;
+    onAddRepo();
+  }
+
   return (
     <section
+      id="workspace-settings-panel"
       aria-labelledby="workspace-root-heading"
       style={{
         padding: "12px 16px",
         borderBottom: "1px solid var(--border)",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 12,
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <h2 id="workspace-root-heading" style={{ fontSize: 14, fontWeight: 650 }}>
-          Workspace root
+          Workspace setup
         </h2>
         <p id={hintId} style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
-          Choose the parent folder that contains your repositories. All Repos sessions start here.
+          Set the parent folder once, then start a workspace session. In that session, ask the agent to add or work on a repo instead of keeping every repo pinned on the home screen.
         </p>
       </div>
+
       <form
         onSubmit={handleSubmit}
         style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}
@@ -516,7 +568,7 @@ function WorkspaceRootSettings({
             htmlFor="workspace-root-path"
             style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}
           >
-            Root directory path
+            Workspace root directory
           </label>
           <input
             id="workspace-root-path"
@@ -551,6 +603,97 @@ function WorkspaceRootSettings({
           {error}
         </p>
       )}
+
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-sm)",
+          background: "rgba(59, 130, 246, 0.08)",
+          padding: 12,
+        }}
+      >
+        <h3 style={{ fontSize: 13, fontWeight: 650, marginBottom: 4 }}>
+          How repos get added now
+        </h3>
+        <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
+          Start a workspace session and say things like “add packages/web as a repo” or “work in agent-cockpit”. Manual registration is still available below for one-off pinning.
+        </p>
+      </div>
+
+      <div>
+        <button
+          type="button"
+          onClick={onToggleAddRepo}
+          aria-expanded={showAddRepo}
+          aria-controls="manual-repo-form"
+          style={{
+            minHeight: 40,
+            padding: "8px 0",
+            color: "var(--accent)",
+            fontSize: 13,
+            fontWeight: 650,
+          }}
+        >
+          {showAddRepo ? "Hide manual repo registration" : "Manual repo registration"}
+        </button>
+        {showAddRepo && (
+          <form
+            id="manual-repo-form"
+            onSubmit={handleManualRepoSubmit}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              paddingTop: 4,
+            }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <label htmlFor="repo-name" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Repo name
+              </label>
+              <input
+                id="repo-name"
+                placeholder="myapp"
+                value={repoName}
+                onChange={(e) => onRepoNameChange(e.target.value)}
+              />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <label htmlFor="repo-path" style={{ fontSize: 13, color: "var(--text-muted)" }}>
+                Local path
+              </label>
+              <input
+                id="repo-path"
+                placeholder="/path/to/your/repo"
+                value={repoPath}
+                onChange={(e) => onRepoPathChange(e.target.value)}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+            {addRepoError && (
+              <p role="alert" style={{ fontSize: 13, color: "var(--danger)", margin: 0 }}>
+                {addRepoError}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={!repoName.trim() || !repoPath.trim()}
+              style={{
+                padding: "10px",
+                background: repoName.trim() && repoPath.trim() ? "var(--accent)" : "var(--bg-surface)",
+                color: repoName.trim() && repoPath.trim() ? "white" : "var(--text-muted)",
+                borderRadius: "var(--radius-sm)",
+                fontWeight: 600,
+                minHeight: 44,
+              }}
+            >
+              Add Manual Repo
+            </button>
+          </form>
+        )}
+      </div>
     </section>
   );
 }
