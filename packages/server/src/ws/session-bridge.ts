@@ -129,6 +129,7 @@ async function ensureCodexAppServerManaged(opts: {
   const client = await getCodexAppServerClient();
   let threadId: string | null = null;
   let threadStatusType: string | null = null;
+  let unreadableThreadId: string | null = null;
 
   if (opts.cliSessionId) {
     try {
@@ -141,6 +142,7 @@ async function ensureCodexAppServerManaged(opts: {
       threadId = resumed?.thread?.id ?? opts.cliSessionId;
       threadStatusType = resumed?.thread?.status?.type ?? null;
     } catch {
+      unreadableThreadId = opts.cliSessionId;
       threadId = null;
     }
   }
@@ -159,9 +161,17 @@ async function ensureCodexAppServerManaged(opts: {
 
     getDb()
       .prepare(
-        "UPDATE sessions SET cli_session_id = ?, updated_at = datetime('now') WHERE id = ?",
+        `UPDATE sessions
+         SET cli_session_id = ?,
+             codex_unreadable_thread_id = COALESCE(codex_unreadable_thread_id, ?),
+             codex_unreadable_at = CASE
+               WHEN ? IS NOT NULL AND codex_unreadable_at IS NULL THEN datetime('now')
+               ELSE codex_unreadable_at
+             END,
+             updated_at = datetime('now')
+         WHERE id = ?`,
       )
-      .run(threadId, opts.sessionId);
+      .run(threadId, unreadableThreadId, unreadableThreadId, opts.sessionId);
   }
 
   reconcileCodexThreadStatus(opts.sessionId, threadStatusType);
@@ -185,58 +195,88 @@ async function ensureCodexAppServerManaged(opts: {
   return managed;
 }
 
-export async function syncCodexThreadMessages(
+type MessageSource = "cockpit" | "cache";
+
+export type DisplayTranscriptSource = "codex-thread" | "db" | "db-fallback";
+
+export interface DisplayMessagesResult {
+  messages: Message[];
+  source: DisplayTranscriptSource;
+  warning?: string;
+  threadName?: string | null;
+}
+
+interface CodexTranscriptResult {
+  messages: Message[];
+  threadName: string | null;
+  threadPreview: string | null;
+}
+
+export async function refreshDisplayTranscript(
   managed: ManagedSession,
   sessionId: string,
-): Promise<{ importedCount: number; messages: Message[] }> {
-  if (managed.runtime !== "codex-app-server" || !managed.codexThreadId) {
-    throw new Error("Sync is only available for Codex sessions.");
-  }
-
-  const client = await getCodexAppServerClient();
-  const result = await client.request("thread/read", {
-    threadId: managed.codexThreadId,
-    includeTurns: true,
-  });
-  const turns = Array.isArray(result?.thread?.turns) ? result.thread.turns : [];
-  let importedCount = 0;
-
-  for (const turn of turns) {
-    const turnTimestamp = sqliteTimestampFromUnixSeconds(
-      turn?.completedAt ?? turn?.startedAt ?? null,
-    );
-    const items = Array.isArray(turn?.items) ? turn.items : [];
-    for (const item of items) {
-      const extracted = messageFromThreadItem(item);
-      if (!extracted) continue;
-      const externalId = `${managed.codexThreadId}:${turn.id}:${item.id}`;
-      if (upsertExternalMessage(
-        sessionId,
-        extracted.role,
-        extracted.content,
-        externalId,
-        turnTimestamp,
-      )) {
-        importedCount += 1;
-      }
-    }
-  }
-
-  if (importedCount > 0) {
-    getDb()
-      .prepare("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?")
-      .run(sessionId);
-  }
-
-  const messages = listSessionMessages(sessionId);
+): Promise<DisplayMessagesResult> {
+  const result = await listDisplayMessagesForSession(managed, sessionId);
   broadcastEvent(managed, {
-    type: "messages_synced",
-    messages,
-    importedCount,
+    type: "transcript_refreshed",
+    messages: result.messages,
+    transcriptSource: result.source,
+    transcriptWarning: result.warning,
     seq: nextSeq(managed),
   });
+  return result;
+}
 
-  return { importedCount, messages };
+export async function listDisplayMessagesForSession(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<DisplayMessagesResult> {
+  if (managed.runtime !== "codex-app-server") {
+    return { messages: listSessionMessages(sessionId), source: "db" };
+  }
+
+  if (!managed.codexThreadId) {
+    return {
+      messages: listSessionMessages(sessionId),
+      source: "db-fallback",
+      warning: "Codex thread id is unavailable; showing Cockpit DB fallback.",
+    };
+  }
+
+  const resumeMarker = getCodexUnreadableThreadMarker(sessionId);
+  try {
+    const transcript = await readCodexTranscript(managed.codexThreadId, sessionId);
+    const legacy = resumeMarker
+      ? listLegacyCodexMessagesForUnreadableThread(sessionId, resumeMarker.at)
+      : [];
+    const overlay = listCodexCockpitOverlayMessages(sessionId);
+    const messages = mergeDisplayMessages(
+      resumeMarker
+        ? [...legacy, ...transcript.messages, ...overlay]
+        : [...transcript.messages, ...overlay],
+    );
+    const source: DisplayTranscriptSource =
+      resumeMarker && (legacy.length > 0 || transcript.messages.length === 0)
+        ? "db-fallback"
+        : "codex-thread";
+    const warning = resumeMarker
+      ? `Previous Codex thread ${resumeMarker.threadId} could not be resumed; showing preserved Cockpit DB history with the current Codex thread.`
+      : undefined;
+
+    return {
+      messages,
+      source,
+      warning,
+      threadName: transcript.threadName ?? transcript.threadPreview,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Codex transcript read failed";
+    return {
+      messages: listSessionMessages(sessionId),
+      source: "db-fallback",
+      warning: `Codex transcript read failed; showing Cockpit DB fallback. ${message}`,
+    };
+  }
 }
 
 function messageFromThreadItem(
@@ -268,48 +308,166 @@ function messageFromThreadItem(
   return null;
 }
 
-function upsertExternalMessage(
+async function readCodexTranscript(
+  threadId: string,
   sessionId: string,
-  role: "user" | "assistant",
-  content: string,
-  externalId: string,
-  createdAt: string | null,
-): boolean {
-  const db = getDb();
-  const existingExternal = db
-    .prepare("SELECT id FROM messages WHERE session_id = ? AND external_id = ?")
-    .get(sessionId, externalId);
-  if (existingExternal) return false;
+): Promise<CodexTranscriptResult> {
+  const client = await getCodexAppServerClient();
+  const result = await client.request("thread/read", {
+    threadId,
+    includeTurns: true,
+  });
+  const thread = result?.thread ?? {};
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const messages: Message[] = [];
 
-  const existingLocal = db
-    .prepare(
-      `SELECT id FROM messages
-       WHERE session_id = ? AND role = ? AND content = ? AND external_id IS NULL
-       ORDER BY created_at ASC LIMIT 1`,
-    )
-    .get(sessionId, role, content) as { id: string } | undefined;
+  turns.forEach((turn: any, turnIndex: number) => {
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    items.forEach((item: any, itemIndex: number) => {
+      const extracted = messageFromThreadItem(item);
+      if (!extracted) return;
+      const timestamp =
+        extracted.role === "user"
+          ? turn?.startedAt ?? turn?.completedAt ?? thread.updatedAt ?? thread.createdAt
+          : turn?.completedAt ?? turn?.startedAt ?? thread.updatedAt ?? thread.createdAt;
+      messages.push({
+        id: stableCodexMessageId(threadId, turn, item, turnIndex, itemIndex, extracted.role),
+        sessionId,
+        turnId: null,
+        role: extracted.role,
+        content: extracted.content,
+        createdAt: isoTimestampFromUnixSeconds(timestamp),
+      });
+    });
+  });
 
-  if (existingLocal) {
-    db.prepare("UPDATE messages SET external_id = ? WHERE id = ?").run(
-      externalId,
-      existingLocal.id,
-    );
-    return false;
-  }
-
-  const id = nanoid();
-  db.prepare(
-    `INSERT INTO messages (id, session_id, turn_id, role, content, external_id, created_at)
-     VALUES (?, ?, NULL, ?, ?, ?, COALESCE(?, datetime('now')))`,
-  ).run(id, sessionId, role, content, externalId, createdAt);
-  return true;
+  return {
+    messages,
+    threadName: typeof thread.name === "string" && thread.name.trim() ? thread.name : null,
+    threadPreview:
+      typeof thread.preview === "string" && thread.preview.trim() ? thread.preview : null,
+  };
 }
 
-function sqliteTimestampFromUnixSeconds(value: unknown): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+function stableCodexMessageId(
+  threadId: string,
+  turn: any,
+  item: any,
+  turnIndex: number,
+  itemIndex: number,
+  role: string,
+): string {
+  if (turn?.id && item?.id) return `${threadId}:${turn.id}:${item.id}`;
+  return `${threadId}:turn-${turnIndex}:item-${itemIndex}:${role}`;
+}
+
+function isoTimestampFromUnixSeconds(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return new Date().toISOString();
+  }
   const date = new Date(value * 1000);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString().slice(0, 19).replace("T", " ");
+  if (Number.isNaN(date.getTime())) return new Date().toISOString();
+  return date.toISOString();
+}
+
+function getCodexUnreadableThreadMarker(
+  sessionId: string,
+): { threadId: string; at: string | null } | null {
+  const row = getDb()
+    .prepare(
+      `SELECT codex_unreadable_thread_id as threadId,
+              codex_unreadable_at as at
+       FROM sessions WHERE id = ?`,
+    )
+    .get(sessionId) as { threadId?: string | null; at?: string | null } | undefined;
+  return row?.threadId ? { threadId: row.threadId, at: row.at ?? null } : null;
+}
+
+function listCodexCockpitOverlayMessages(sessionId: string): Message[] {
+  return getDb()
+    .prepare(
+      `SELECT id, session_id as sessionId, turn_id as turnId, role, content,
+              created_at as createdAt
+       FROM messages
+       WHERE session_id = ?
+         AND (
+           source = 'cockpit'
+           OR (
+             source IS NULL
+             AND turn_id IN (
+               SELECT turn_id FROM messages
+               WHERE session_id = ? AND role = 'user' AND content LIKE '/%'
+             )
+           )
+         )
+       ORDER BY created_at ASC, id ASC`,
+    )
+    .all(sessionId, sessionId) as Message[];
+}
+
+function listLegacyCodexMessagesForUnreadableThread(
+  sessionId: string,
+  unreadableAt: string | null,
+): Message[] {
+  const cutoffClause = unreadableAt ? "AND created_at <= ?" : "";
+  const params = unreadableAt ? [sessionId, unreadableAt] : [sessionId];
+  return getDb()
+    .prepare(
+      `SELECT id, session_id as sessionId, turn_id as turnId, role, content,
+              created_at as createdAt
+       FROM messages
+       WHERE session_id = ?
+         AND external_id IS NULL
+         AND (source IS NULL OR source IN ('cache', 'cockpit'))
+         ${cutoffClause}
+       ORDER BY created_at ASC, id ASC`,
+    )
+    .all(...params) as Message[];
+}
+
+function mergeDisplayMessages(messages: Message[]): Message[] {
+  const seen = new Set<string>();
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort((a, b) => {
+      const timeA = Date.parse(a.message.createdAt);
+      const timeB = Date.parse(b.message.createdAt);
+      const safeA = Number.isNaN(timeA) ? 0 : timeA;
+      const safeB = Number.isNaN(timeB) ? 0 : timeB;
+      return safeA === safeB ? a.index - b.index : safeA - safeB;
+    })
+    .flatMap(({ message }) => {
+      const key = `${message.id}\u0000${message.role}\u0000${message.content}\u0000${message.createdAt}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [message];
+    });
+}
+
+export async function getLastUserMessage(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<string | null> {
+  if (managed.runtime === "codex-app-server" && managed.codexThreadId) {
+    try {
+      const transcript = await readCodexTranscript(managed.codexThreadId, sessionId);
+      const lastUser = [...transcript.messages].reverse().find((m) => m.role === "user");
+      if (lastUser?.content) return lastUser.content;
+    } catch {
+      // Fall back to Cockpit DB below.
+    }
+  }
+
+  const excludeSlash = managed.runtime === "codex-app-server";
+  const row = getDb()
+    .prepare(
+      `SELECT content FROM messages
+       WHERE session_id = ? AND role = 'user'
+         ${excludeSlash ? "AND content NOT LIKE '/%'" : ""}
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(sessionId) as { content?: string } | undefined;
+  return row?.content ?? null;
 }
 
 function listSessionMessages(sessionId: string): Message[] {
@@ -461,9 +619,15 @@ export function sendPrompt(
     return { ok: false, error: "Session is already running" };
   }
 
-  const turnId = createRunningTurn(sessionId, content);
-
   const slashContent = content.trimStart();
+  const messageSource: MessageSource | undefined =
+    managed.runtime === "codex-app-server"
+      ? slashContent.startsWith("/")
+        ? "cockpit"
+        : "cache"
+      : undefined;
+  const turnId = createRunningTurn(sessionId, content, messageSource);
+
   if (!slashContent.startsWith("/")) {
     maybeAutoTitleSession(managed, sessionId, content);
   }
@@ -644,11 +808,12 @@ function handleCodexAppServerMessage(
       const externalId = managed.codexThreadId && params.turnId && item.id
         ? `${managed.codexThreadId}:${params.turnId}:${item.id}`
         : undefined;
-      persistMessage(sessionId, "assistant", content, undefined, externalId);
+      persistMessage(sessionId, "assistant", content, undefined, externalId, "cache");
       broadcastEvent(managed, {
         type: "message_complete",
         role: "assistant",
         content,
+        messageId: externalId,
         seq: nextSeq(managed),
       });
     }
@@ -852,7 +1017,7 @@ async function handleSlashCommand(
     }
 
     const reply = result.content;
-    persistMessage(sessionId, "assistant", reply, turnId);
+    persistMessage(sessionId, "assistant", reply, turnId, undefined, "cockpit");
     completeTurn(sessionId);
     updateSessionStatus(sessionId, "idle");
     broadcastEvent(managed, {
@@ -877,7 +1042,14 @@ async function handleSlashCommand(
       return;
     }
     const message = err instanceof Error ? err.message : "Slash command failed";
-    persistMessage(sessionId, "assistant", `Slash command failed: ${message}`, turnId);
+    persistMessage(
+      sessionId,
+      "assistant",
+      `Slash command failed: ${message}`,
+      turnId,
+      undefined,
+      "cockpit",
+    );
     failTurn(sessionId);
     updateSessionStatus(sessionId, "error");
     broadcastEvent(managed, {
@@ -980,7 +1152,7 @@ async function runNonCodexSlashCommand(
     case "/rename":
       return slashRenameCockpitOnly(sessionId, trimmed.slice(command.length).trim());
     case "/copy":
-      return slashCopyLastAssistantMessage(sessionId);
+      return slashCopyLastAssistantMessage(managed, sessionId);
     case "/new":
     case "/clear":
       return slashNewSession(sessionId, trimmed.slice(command.length).trim());
@@ -1043,7 +1215,7 @@ async function runSlashCommand(
     case "/rename":
       return messageResult(await slashRename(managed, sessionId, args));
     case "/copy":
-      return messageResult(await slashCopyLastAssistantMessage(sessionId));
+      return messageResult(await slashCopyLastAssistantMessage(managed, sessionId));
     case "/new":
     case "/clear":
       return messageResult(await slashNewSession(sessionId, args));
@@ -1458,7 +1630,30 @@ function slashRenameCockpitOnly(sessionId: string, name: string): string {
   return `Renamed current Cockpit session to **${trimmedName}**.`;
 }
 
-function slashCopyLastAssistantMessage(sessionId: string): string {
+async function slashCopyLastAssistantMessage(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<string> {
+  if (managed.runtime === "codex-app-server" && managed.codexThreadId) {
+    try {
+      const transcript = await readCodexTranscript(managed.codexThreadId, sessionId);
+      const lastAssistant = [...transcript.messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      if (lastAssistant?.content) {
+        return [
+          "## Last assistant response",
+          "",
+          "Copy the markdown below:",
+          "",
+          codeBlock(lastAssistant.content, "markdown"),
+        ].join("\n");
+      }
+    } catch {
+      // Fall back to the DB query below, which excludes local slash-command turns.
+    }
+  }
+
   const row = getDb()
     .prepare(
       `SELECT assistant.content
@@ -1881,14 +2076,18 @@ function createTitleFromPrompt(content: string): string {
   return [...firstMeaningfulLine].slice(0, AUTO_TITLE_MAX_LENGTH - 1).join("").trimEnd() + "…";
 }
 
-function createRunningTurn(sessionId: string, content: string): string {
+function createRunningTurn(
+  sessionId: string,
+  content: string,
+  source?: MessageSource,
+): string {
   const db = getDb();
   const turnSeq = getNextTurnSeq(sessionId);
   const turnId = nanoid();
   db.prepare(
     "INSERT INTO turns (id, session_id, seq, status) VALUES (?, ?, ?, 'running')",
   ).run(turnId, sessionId, turnSeq);
-  persistMessage(sessionId, "user", content, turnId);
+  persistMessage(sessionId, "user", content, turnId, undefined, source);
   return turnId;
 }
 
@@ -1924,6 +2123,7 @@ function persistMessage(
   content: string,
   turnId?: string,
   externalId?: string,
+  source?: MessageSource,
 ) {
   const db = getDb();
   const id = nanoid();
@@ -1946,9 +2146,9 @@ function persistMessage(
   }
 
   db.prepare(
-    `INSERT INTO messages (id, session_id, turn_id, role, content, external_id)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, sessionId, resolvedTurnId, role, content, externalId ?? null);
+    `INSERT INTO messages (id, session_id, turn_id, role, content, external_id, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, sessionId, resolvedTurnId, role, content, externalId ?? null, source ?? null);
 }
 
 function completeTurn(sessionId: string, cost?: number) {

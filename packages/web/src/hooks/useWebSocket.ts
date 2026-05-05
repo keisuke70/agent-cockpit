@@ -16,10 +16,10 @@ interface UseWebSocketResult {
   rawStdout: string;
   status: SessionStatus | "connecting";
   sessionName: string | null | undefined;
-  syncingMessages: boolean;
-  syncError: string;
+  refreshingTranscript: boolean;
+  transcriptRefreshError: string;
   sendPrompt: (text: string) => void;
-  syncMessages: () => void;
+  refreshTranscript: () => void;
   stop: () => void;
   retry: () => void;
 }
@@ -34,8 +34,8 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   const [rawStdout, setRawStdout] = useState("");
   const [status, setStatus] = useState<SessionStatus | "connecting">("connecting");
   const [sessionName, setSessionName] = useState<string | null | undefined>(undefined);
-  const [syncingMessages, setSyncingMessages] = useState(false);
-  const [syncError, setSyncError] = useState("");
+  const [refreshingTranscript, setRefreshingTranscript] = useState(false);
+  const [transcriptRefreshError, setTranscriptRefreshError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,18 +79,19 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           lastSeqRef.current = event.lastSeq;
           setStatus(event.status);
           setSessionName(event.sessionName);
-          setSyncingMessages(false);
+          setRefreshingTranscript(false);
+          setTranscriptRefreshError(event.transcriptWarning ?? "");
           break;
 
-        case "messages_synced":
+        case "transcript_refreshed":
           setMessages(event.messages);
-          setSyncingMessages(false);
-          setSyncError("");
+          setRefreshingTranscript(false);
+          setTranscriptRefreshError(event.transcriptWarning ?? "");
           break;
 
-        case "messages_sync_failed":
-          setSyncingMessages(false);
-          setSyncError(event.message);
+        case "transcript_refresh_failed":
+          setRefreshingTranscript(false);
+          setTranscriptRefreshError(event.message);
           break;
 
         case "text_delta":
@@ -101,7 +102,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           setMessages((prev) => [
             ...prev,
             {
-              id: crypto.randomUUID(),
+              id: event.messageId ?? crypto.randomUUID(),
               sessionId,
               turnId: null,
               role: event.role,
@@ -134,7 +135,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           break;
 
         case "error":
-          setSyncingMessages(false);
+          setRefreshingTranscript(false);
           setStatus("error");
           break;
 
@@ -175,8 +176,8 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     setRawStdout("");
     setStatus("connecting");
     setSessionName(undefined);
-    setSyncingMessages(false);
-    setSyncError("");
+    setRefreshingTranscript(false);
+    setTranscriptRefreshError("");
 
     connect();
     return () => {
@@ -218,32 +219,17 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     }
   }, []);
 
-  const syncMessages = useCallback(() => {
+  const refreshTranscript = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    setSyncingMessages(true);
-    setSyncError("");
-    ws.send(JSON.stringify({ type: "sync_messages" }));
+    setRefreshingTranscript(true);
+    setTranscriptRefreshError("");
+    ws.send(JSON.stringify({ type: "refresh_transcript" }));
   }, []);
 
   const retry = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-    // Find last user message to optimistically re-append for transcript continuity
-    setMessages((prev) => {
-      const lastUser = [...prev].reverse().find((m) => m.role === "user");
-      if (!lastUser) return prev;
-      return [
-        ...prev,
-        {
-          ...lastUser,
-          id: crypto.randomUUID(),
-          createdAt: new Date().toISOString(),
-        },
-      ];
-    });
-
     ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
@@ -254,10 +240,10 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     rawStdout,
     status,
     sessionName,
-    syncingMessages,
+    refreshingTranscript,
     sendPrompt,
-    syncMessages,
-    syncError,
+    refreshTranscript,
+    transcriptRefreshError,
     stop,
     retry,
   };

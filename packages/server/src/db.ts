@@ -106,6 +106,9 @@ function migrate(db: Database.Database) {
   `);
 
   ensureColumn(db, "messages", "external_id", "TEXT");
+  ensureColumn(db, "messages", "source", "TEXT");
+  ensureColumn(db, "sessions", "codex_unreadable_thread_id", "TEXT");
+  ensureColumn(db, "sessions", "codex_unreadable_at", "TEXT");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_external
     ON messages(session_id, external_id)

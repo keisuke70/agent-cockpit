@@ -1,12 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
-import type { ClientMessage, Message, SnapshotEvent } from "@agent-cockpit/shared";
+import type { ClientMessage, SnapshotEvent } from "@agent-cockpit/shared";
 import { getDb } from "../db.js";
 import {
   ensureManaged,
+  getLastUserMessage,
+  listDisplayMessagesForSession,
+  refreshDisplayTranscript,
   sendPrompt,
   stopSession,
-  syncCodexThreadMessages,
 } from "./session-bridge.js";
 import {
   broadcastEvent,
@@ -42,28 +44,72 @@ export async function wsRoutes(app: FastifyInstance) {
         return;
       }
 
-      // Send initial snapshot or catch-up events
+      const queuedEvents: any[] = [];
+      let replayReady = false;
+      const listener = (event: any) => {
+        if (socket.readyState !== 1) return;
+        if (!replayReady) {
+          queuedEvents.push(event);
+          return;
+        }
+        socket.send(JSON.stringify(event));
+      };
+      managed.listeners.add(listener);
+
+      const flushQueuedEventsAfter = (
+        lastSentSeq: number,
+        snapshot?: SnapshotEvent,
+      ) => {
+        replayReady = true;
+        const snapshotAssistantIds = new Set(
+          snapshot?.messages
+            .filter((message) => message.role === "assistant")
+            .map((message) => message.id) ?? [],
+        );
+        let reflectedCompleteSeq = -1;
+        for (const event of queuedEvents) {
+          const seq = getEventSeq(event);
+          if (
+            seq !== null &&
+            seq > lastSentSeq &&
+            isReflectedMessageComplete(event, snapshotAssistantIds)
+          ) {
+            reflectedCompleteSeq = Math.max(reflectedCompleteSeq, seq);
+          }
+        }
+
+        for (const event of queuedEvents) {
+          const seq = getEventSeq(event);
+          if (seq !== null && seq <= lastSentSeq) continue;
+          if (shouldSuppressSnapshotReflectedEvent(event, reflectedCompleteSeq)) continue;
+          socket.send(JSON.stringify(event));
+        }
+        queuedEvents.length = 0;
+      };
+
+      // Send initial snapshot or catch-up events. The live listener is already
+      // installed so an async Codex thread/read snapshot cannot drop turn
+      // events that arrive while the snapshot is being assembled.
+      const replayStartSeq = managed.seq;
       if (lastSeqParam) {
         const lastSeq = parseInt(lastSeqParam, 10);
         const catchUp = getEventsSince(managed, lastSeq);
         if (catchUp) {
+          let lastSentSeq = lastSeq;
           for (const event of catchUp) {
             socket.send(JSON.stringify(event));
+            const seq = getEventSeq(event);
+            if (seq !== null) lastSentSeq = Math.max(lastSentSeq, seq);
           }
+          flushQueuedEventsAfter(lastSentSeq);
         } else {
-          sendSnapshotMsg(socket, sessionId, managed.seq);
+          const snapshot = await sendSnapshotMsg(socket, managed, sessionId, replayStartSeq);
+          flushQueuedEventsAfter(replayStartSeq, snapshot);
         }
       } else {
-        sendSnapshotMsg(socket, sessionId, managed.seq);
+        const snapshot = await sendSnapshotMsg(socket, managed, sessionId, replayStartSeq);
+        flushQueuedEventsAfter(replayStartSeq, snapshot);
       }
-
-      // Subscribe to live events
-      const listener = (event: any) => {
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify(event));
-        }
-      };
-      managed.listeners.add(listener);
 
       socket.on("message", async (raw: any) => {
         let msg: ClientMessage;
@@ -102,7 +148,7 @@ export async function wsRoutes(app: FastifyInstance) {
             stopSession(current, sessionId!);
             break;
           case "retry": {
-            const lastUserMsg = getLastUserMessage(sessionId!);
+            const lastUserMsg = await getLastUserMessage(current, sessionId!);
             if (lastUserMsg) {
               const result = sendPrompt(current, sessionId!, lastUserMsg);
               if (!result.ok) {
@@ -111,13 +157,14 @@ export async function wsRoutes(app: FastifyInstance) {
             }
             break;
           }
+          case "refresh_transcript":
           case "sync_messages":
             try {
-              await syncCodexThreadMessages(current, sessionId!);
+              await refreshDisplayTranscript(current, sessionId!);
             } catch (err) {
-              const message = err instanceof Error ? err.message : "Sync failed";
+              const message = err instanceof Error ? err.message : "Refresh failed";
               broadcastEvent(current, {
-                type: "messages_sync_failed",
+                type: "transcript_refresh_failed",
                 message,
                 seq: nextSeq(current),
               });
@@ -138,15 +185,14 @@ export async function wsRoutes(app: FastifyInstance) {
   );
 }
 
-function sendSnapshotMsg(socket: WebSocket, sessionId: string, lastSeq: number) {
+async function sendSnapshotMsg(
+  socket: WebSocket,
+  managed: ManagedSession,
+  sessionId: string,
+  lastSeq: number,
+): Promise<SnapshotEvent> {
   const db = getDb();
-  const messages = db
-    .prepare(
-      `SELECT id, session_id as sessionId, turn_id as turnId, role, content,
-              created_at as createdAt
-       FROM messages WHERE session_id = ? ORDER BY created_at ASC`,
-    )
-    .all(sessionId) as Message[];
+  const display = await listDisplayMessagesForSession(managed, sessionId);
 
   const session = db
     .prepare("SELECT status, name FROM sessions WHERE id = ?")
@@ -154,21 +200,54 @@ function sendSnapshotMsg(socket: WebSocket, sessionId: string, lastSeq: number) 
 
   const snapshot: SnapshotEvent = {
     type: "snapshot",
-    messages,
+    messages: display.messages,
     lastSeq,
     status: session?.status ?? "idle",
-    sessionName: session?.name ?? null,
+    sessionName: session?.name ?? display.threadName ?? null,
+    transcriptSource: display.source,
+    transcriptWarning: display.warning,
   };
 
   socket.send(JSON.stringify(snapshot));
+  return snapshot;
 }
 
-function getLastUserMessage(sessionId: string): string | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
-    )
-    .get(sessionId) as any;
-  return row?.content ?? null;
+function getEventSeq(event: unknown): number | null {
+  if (
+    event &&
+    typeof event === "object" &&
+    "seq" in event &&
+    typeof (event as { seq?: unknown }).seq === "number"
+  ) {
+    return (event as { seq: number }).seq;
+  }
+  return null;
+}
+
+function isReflectedMessageComplete(
+  event: unknown,
+  snapshotAssistantIds: Set<string>,
+): boolean {
+  return Boolean(
+    event &&
+      typeof event === "object" &&
+      "type" in event &&
+      (event as { type?: unknown }).type === "message_complete" &&
+      "messageId" in event &&
+      typeof (event as { messageId?: unknown }).messageId === "string" &&
+      snapshotAssistantIds.has((event as { messageId: string }).messageId),
+  );
+}
+
+function shouldSuppressSnapshotReflectedEvent(
+  event: unknown,
+  reflectedCompleteSeq: number,
+): boolean {
+  const seq = getEventSeq(event);
+  if (seq === null || reflectedCompleteSeq < 0 || seq > reflectedCompleteSeq) {
+    return false;
+  }
+  if (!event || typeof event !== "object" || !("type" in event)) return false;
+  const type = (event as { type?: unknown }).type;
+  return type === "text_delta" || type === "tool_use" || type === "message_complete";
 }

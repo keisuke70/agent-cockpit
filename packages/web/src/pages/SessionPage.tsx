@@ -25,10 +25,10 @@ export function SessionPage() {
     rawStdout,
     status,
     sessionName,
-    syncingMessages,
-    syncError,
+    refreshingTranscript,
+    transcriptRefreshError,
     sendPrompt,
-    syncMessages,
+    refreshTranscript,
     stop,
     retry,
   } = useWebSocket(id!);
@@ -118,9 +118,9 @@ export function SessionPage() {
                 {deleteError}
               </span>
             )}
-            {syncError && (
+            {transcriptRefreshError && (
               <span role="alert" style={{ color: "var(--danger)" }}>
-                Sync failed: {syncError}
+                Refresh: {transcriptRefreshError}
               </span>
             )}
           </div>
@@ -147,11 +147,11 @@ export function SessionPage() {
           <button
             className="session-chip-button"
             type="button"
-            onClick={syncMessages}
-            disabled={syncingMessages || status === "connecting" || status === "running"}
-            title="Import missing messages from the Codex thread into this Cockpit transcript"
+            onClick={refreshTranscript}
+            disabled={refreshingTranscript || status === "connecting" || status === "running"}
+            title="Re-read the Codex thread transcript"
           >
-            {syncingMessages ? "Syncing" : "Sync"}
+            {refreshingTranscript ? "Refreshing" : "Refresh"}
           </button>
         )}
         <button

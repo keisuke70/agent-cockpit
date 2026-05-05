@@ -18,6 +18,7 @@ export interface MessageCompleteEvent {
   type: "message_complete";
   content: string;
   role: "assistant";
+  messageId?: string;
   seq: number;
 }
 
@@ -59,17 +60,20 @@ export interface SnapshotEvent {
   lastSeq: number;
   status: SessionStatus;
   sessionName: string | null;
+  transcriptSource?: "codex-thread" | "db" | "db-fallback";
+  transcriptWarning?: string;
 }
 
-export interface MessagesSyncedEvent {
-  type: "messages_synced";
+export interface TranscriptRefreshedEvent {
+  type: "transcript_refreshed";
   messages: Message[];
-  importedCount: number;
+  transcriptSource?: "codex-thread" | "db" | "db-fallback";
+  transcriptWarning?: string;
   seq: number;
 }
 
-export interface MessagesSyncFailedEvent {
-  type: "messages_sync_failed";
+export interface TranscriptRefreshFailedEvent {
+  type: "transcript_refresh_failed";
   message: string;
   seq: number;
 }
@@ -95,8 +99,8 @@ export type ServerEvent =
   | ErrorEvent
   | StatusEvent
   | SessionUpdatedEvent
-  | MessagesSyncedEvent
-  | MessagesSyncFailedEvent
+  | TranscriptRefreshedEvent
+  | TranscriptRefreshFailedEvent
   | RawStdoutEvent
   | SnapshotEvent;
 
@@ -135,8 +139,13 @@ export interface SyncMessagesMessage {
   type: "sync_messages";
 }
 
+export interface RefreshTranscriptMessage {
+  type: "refresh_transcript";
+}
+
 export type ClientMessage =
   | SendPromptMessage
   | StopMessage
   | RetryMessage
-  | SyncMessagesMessage;
+  | SyncMessagesMessage
+  | RefreshTranscriptMessage;
