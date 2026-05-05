@@ -43,8 +43,8 @@ const schemaCandidates = [
   path.join(repoRoot, '.agents', 'scripts', 'review-schema.json'),
   path.join(repoRoot, 'skills', 'core', 'review-schema.json'),
 ];
-const model = process.env.CODEX_REVIEW_MODEL ?? 'gpt-5.4';
-const reasoningEffort = process.env.CODEX_REVIEW_REASONING_EFFORT ?? 'medium';
+const model = process.env.CODEX_REVIEW_MODEL?.trim() || null;
+const reasoningEffort = process.env.CODEX_REVIEW_REASONING_EFFORT?.trim() || null;
 const timeoutSeconds = Number.parseInt(
   process.env.CODEX_REVIEW_TIMEOUT_SECONDS ?? '300',
   10,
@@ -460,12 +460,16 @@ async function runCodex(
     'never',
     '-C',
     repoRoot,
-    '-m',
-    model,
-    '-c',
-    `model_reasoning_effort="${reasoningEffort}"`,
     'exec',
   ];
+
+  if (model) {
+    args.splice(args.indexOf('exec'), 0, '-m', model);
+  }
+
+  if (reasoningEffort) {
+    args.splice(args.indexOf('exec'), 0, '-c', `model_reasoning_effort="${reasoningEffort}"`);
+  }
 
   if (sessionId) {
     args.push('resume', '--json', sessionId, '-');
