@@ -33,6 +33,11 @@ function statusMatchesFilter(
   return status === filter;
 }
 
+function folderName(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.split("/").pop() || trimmed || path;
+}
+
 export function HomePage() {
   const navigate = useNavigate();
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -277,20 +282,6 @@ export function HomePage() {
     fetchRepos();
   }
 
-  async function deleteSelectedRepo() {
-    if (!isSpecificRepo) return;
-    const repo = repos.find((r) => r.id === selectedRepoId);
-    if (!repo) return;
-    if (!confirm(`Delete repo "${repo.name}" and all its sessions?`)) return;
-    await fetch(`/api/repos/${selectedRepoId}`, {
-      method: "DELETE",
-      headers: authHeaders(),
-    });
-    handleRepoChange(ALL_REPOS);
-    setSessions([]);
-    fetchRepos();
-  }
-
   const canCreateSession =
     isSpecificRepo ||
     (isAllRepos && Boolean(workspaceSettings.rootPath && workspaceSettings.workspaceRepoId));
@@ -308,44 +299,42 @@ export function HomePage() {
     <>
       <header
         style={{
-          padding: "16px",
+          padding: "12px 16px",
           borderBottom: "1px solid var(--border)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
+          gap: 12,
         }}
       >
-        <h1 style={{ fontSize: 20, fontWeight: 600 }}>Agent Cockpit</h1>
-        <div style={{ display: "flex", gap: 4 }}>
-          {isSpecificRepo && (
-            <button
-              onClick={deleteSelectedRepo}
-              style={{
-                fontSize: 13,
-                color: "var(--danger)",
-                padding: "6px 12px",
-              }}
-              aria-label="Delete selected repo"
-            >
-              Delete
-            </button>
-          )}
-          <button
-            onClick={() => setShowWorkspaceSettings((showing) => !showing)}
-            aria-expanded={shouldShowWorkspaceSettings}
-            aria-controls="workspace-settings-panel"
-            style={{
-              fontSize: 13,
-              color: "var(--accent)",
-              padding: "6px 12px",
-            }}
-          >
-            Workspace
-          </button>
-        </div>
+        <h1 style={{ fontSize: 18, fontWeight: 650, flexShrink: 0 }}>Agent Cockpit</h1>
+        <button
+          type="button"
+          onClick={() => setShowWorkspaceSettings(true)}
+          aria-expanded={shouldShowWorkspaceSettings}
+          aria-controls="workspace-settings-panel"
+          title={workspaceSettings.rootPath ?? "Set folder"}
+          style={{
+            minWidth: 0,
+            minHeight: 36,
+            padding: "6px 10px",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-sm)",
+            color: "var(--accent)",
+            fontSize: 13,
+            fontWeight: 600,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {workspaceSettings.rootPath
+            ? `Folder: ${folderName(workspaceSettings.rootPath)}`
+            : "Set folder"}
+        </button>
       </header>
 
-      {shouldShowWorkspaceSettings ? (
+      {shouldShowWorkspaceSettings && (
         <WorkspaceRootSettings
           rootPath={workspaceSettings.rootPath}
           value={workspaceRootInput}
@@ -357,15 +346,15 @@ export function HomePage() {
           addRepoError={addRepoError}
           onChange={setWorkspaceRootInput}
           onSave={saveWorkspaceRoot}
+          onClose={
+            workspaceSettings.rootPath && !workspaceRootError
+              ? () => setShowWorkspaceSettings(false)
+              : undefined
+          }
           onToggleAddRepo={() => setShowAddRepo((showing) => !showing)}
           onRepoNameChange={setRepoName}
           onRepoPathChange={setRepoPath}
           onAddRepo={addRepo}
-        />
-      ) : (
-        <WorkspaceSummary
-          rootPath={workspaceSettings.rootPath}
-          onOpenSettings={() => setShowWorkspaceSettings(true)}
         />
       )}
 
@@ -436,60 +425,6 @@ export function HomePage() {
   );
 }
 
-function WorkspaceSummary({
-  rootPath,
-  onOpenSettings,
-}: {
-  rootPath: string | null;
-  onOpenSettings: () => void;
-}) {
-  return (
-    <section
-      aria-label="Workspace setup"
-      style={{
-        padding: "10px 16px",
-        borderBottom: "1px solid var(--border)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-      }}
-    >
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 650 }}>Workspace sessions</div>
-        <p
-          style={{
-            margin: 0,
-            color: "var(--text-muted)",
-            fontSize: 13,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {rootPath ?? "Set a root folder"} · add repos from inside a session when needed
-        </p>
-      </div>
-      <button
-        type="button"
-        onClick={onOpenSettings}
-        style={{
-          flexShrink: 0,
-          minHeight: 36,
-          padding: "6px 12px",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-sm)",
-          color: "var(--accent)",
-          fontSize: 13,
-          fontWeight: 600,
-        }}
-      >
-        Change
-      </button>
-    </section>
-  );
-}
-
 function WorkspaceRootSettings({
   rootPath,
   value,
@@ -501,6 +436,7 @@ function WorkspaceRootSettings({
   addRepoError,
   onChange,
   onSave,
+  onClose,
   onToggleAddRepo,
   onRepoNameChange,
   onRepoPathChange,
@@ -516,6 +452,7 @@ function WorkspaceRootSettings({
   addRepoError: string;
   onChange: (value: string) => void;
   onSave: () => void;
+  onClose?: () => void;
   onToggleAddRepo: () => void;
   onRepoNameChange: (value: string) => void;
   onRepoPathChange: (value: string) => void;
@@ -550,13 +487,33 @@ function WorkspaceRootSettings({
         gap: 12,
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <h2 id="workspace-root-heading" style={{ fontSize: 14, fontWeight: 650 }}>
-          Workspace setup
-        </h2>
-        <p id={hintId} style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
-          Set the parent folder once, then start a workspace session. In that session, ask the agent to add or work on a repo instead of keeping every repo pinned on the home screen.
-        </p>
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <h2 id="workspace-root-heading" style={{ fontSize: 14, fontWeight: 650 }}>
+            Folder
+          </h2>
+          <p id={hintId} style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
+            Pick the folder that contains your repos. New workspace sessions start here.
+          </p>
+        </div>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              flexShrink: 0,
+              minHeight: 36,
+              padding: "6px 12px",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-sm)",
+              color: "var(--text-muted)",
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            Done
+          </button>
+        )}
       </div>
 
       <form
@@ -568,7 +525,7 @@ function WorkspaceRootSettings({
             htmlFor="workspace-root-path"
             style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginBottom: 6 }}
           >
-            Workspace root directory
+            Folder path
           </label>
           <input
             id="workspace-root-path"
@@ -595,7 +552,7 @@ function WorkspaceRootSettings({
             fontWeight: 600,
           }}
         >
-          {saving ? "Saving..." : rootPath ? "Update root" : "Set root"}
+          {saving ? "Saving..." : rootPath ? "Save" : "Set folder"}
         </button>
       </form>
       {error && (
@@ -613,10 +570,10 @@ function WorkspaceRootSettings({
         }}
       >
         <h3 style={{ fontSize: 13, fontWeight: 650, marginBottom: 4 }}>
-          How repos get added now
+          Repos
         </h3>
         <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
-          Start a workspace session and say things like “add packages/web as a repo” or “work in agent-cockpit”. Manual registration is still available below for one-off pinning.
+          In a session, ask the agent to add or use a repo. Manual pinning is still available below.
         </p>
       </div>
 
@@ -634,7 +591,7 @@ function WorkspaceRootSettings({
             fontWeight: 650,
           }}
         >
-          {showAddRepo ? "Hide manual repo registration" : "Manual repo registration"}
+          {showAddRepo ? "Hide manual pinning" : "Pin repo manually"}
         </button>
         {showAddRepo && (
           <form
@@ -689,7 +646,7 @@ function WorkspaceRootSettings({
                 minHeight: 44,
               }}
             >
-              Add Manual Repo
+              Pin Repo
             </button>
           </form>
         )}
