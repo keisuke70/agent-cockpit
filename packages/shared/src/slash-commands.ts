@@ -66,10 +66,10 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/permissions",
-    description: "Choose what Codex is allowed to do.",
+    description: "Show current Cockpit permission and sandbox settings.",
     aliases: ["/approval", "/approvals"],
     category: "configuration",
-    support: "recognized",
+    support: "local",
   },
   {
     command: "/keymap",
@@ -145,29 +145,30 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/new",
-    description: "Start a new chat during a conversation.",
+    description: "Create a clean Cockpit session in the same repo.",
     category: "session",
-    support: "recognized",
+    support: "local",
+    supportsInlineArgs: true,
   },
   {
     command: "/resume",
-    description: "Resume a saved chat.",
+    description: "Browse and open saved Cockpit sessions.",
     category: "session",
-    support: "recognized",
+    support: "local",
     supportsInlineArgs: true,
   },
   {
     command: "/sessions",
-    description: "Browse saved chats.",
+    description: "Browse saved Cockpit sessions.",
     aliases: ["/history"],
     category: "session",
-    support: "recognized",
+    support: "local",
   },
   {
     command: "/fork",
     description: "Fork the current chat.",
     category: "session",
-    support: "recognized",
+    support: "codex-app-server",
   },
   {
     command: "/init",
@@ -223,9 +224,9 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/copy",
-    description: "Copy last response as markdown.",
+    description: "Show the last assistant response as copyable markdown.",
     category: "ui",
-    support: "recognized",
+    support: "local",
   },
   {
     command: "/diff",
@@ -328,10 +329,11 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/clear",
-    description: "Clear the terminal and start a new chat.",
+    description: "Create a clean Cockpit session in the same repo.",
     aliases: ["/c"],
     category: "session",
-    support: "recognized",
+    support: "local",
+    supportsInlineArgs: true,
   },
   {
     command: "/personality",

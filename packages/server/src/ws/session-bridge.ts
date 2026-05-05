@@ -813,6 +813,8 @@ async function runNonCodexSlashCommand(
       return slashBasicStatus(sessionId);
     case "/model":
       return slashModels();
+    case "/permissions":
+      return slashPermissions(sessionId);
     case "/mcp":
       return slashMcp(trimmed.slice(command.length).trim());
     case "/diff":
@@ -831,6 +833,14 @@ async function runNonCodexSlashCommand(
       return slashPlugins(sessionId);
     case "/rename":
       return slashRenameCockpitOnly(sessionId, trimmed.slice(command.length).trim());
+    case "/copy":
+      return slashCopyLastAssistantMessage(sessionId);
+    case "/new":
+    case "/clear":
+      return slashNewSession(sessionId, trimmed.slice(command.length).trim());
+    case "/resume":
+    case "/sessions":
+      return slashResume(sessionId, trimmed.slice(command.length).trim());
     default:
       if (definition) {
         return [
@@ -866,6 +876,8 @@ async function runSlashCommand(
       return messageResult(await slashStatus(managed, sessionId));
     case "/model":
       return messageResult(await slashModels());
+    case "/permissions":
+      return messageResult(await slashPermissions(sessionId));
     case "/mcp":
       return messageResult(await slashMcp(args));
     case "/diff":
@@ -884,6 +896,16 @@ async function runSlashCommand(
       return messageResult(await slashPlugins(sessionId));
     case "/rename":
       return messageResult(await slashRename(managed, sessionId, args));
+    case "/copy":
+      return messageResult(await slashCopyLastAssistantMessage(sessionId));
+    case "/new":
+    case "/clear":
+      return messageResult(await slashNewSession(sessionId, args));
+    case "/resume":
+    case "/sessions":
+      return messageResult(await slashResume(sessionId, args));
+    case "/fork":
+      return messageResult(await slashFork(managed, sessionId));
     case "/goal":
       return messageResult(await slashGoal(managed, args));
     case "/review":
@@ -1048,6 +1070,45 @@ async function slashModels(): Promise<string> {
         markers.length ? ` — ${markers.join(", ")}` : ""
       }`;
     }),
+  ].join("\n");
+}
+
+async function slashPermissions(sessionId: string): Promise<string> {
+  let config: any = null;
+  try {
+    const client = await getCodexAppServerClient();
+    config = await client.request("config/read", {
+      cwd: getSessionCwd(sessionId),
+    });
+  } catch {
+    // Non-Codex sessions can still report the Cockpit launch-time defaults.
+  }
+
+  const effective = config?.effectiveValue ?? config?.effective ?? config ?? {};
+  const sandbox =
+    effective.sandboxMode ??
+    effective.sandbox ??
+    effective.sandbox_policy ??
+    "danger-full-access";
+  const approval =
+    effective.approvalPolicy ??
+    effective.approval_policy ??
+    "never";
+  const reviewer =
+    effective.approvalsReviewer ??
+    effective.approvals_reviewer ??
+    "user";
+
+  return [
+    "## Permissions",
+    "",
+    "Cockpit launches Codex sessions with these defaults:",
+    "",
+    `- Approval policy: ${inlineCode(String(approval))}`,
+    `- Sandbox: ${inlineCode(String(sandbox))}`,
+    `- Approval reviewer: ${inlineCode(String(reviewer))}`,
+    "",
+    "Changing permissions interactively is not exposed yet; start a new Cockpit session after changing server/config defaults.",
   ].join("\n");
 }
 
@@ -1251,6 +1312,217 @@ function slashRenameCockpitOnly(sessionId: string, name: string): string {
   return `Renamed current Cockpit session to **${trimmedName}**.`;
 }
 
+function slashCopyLastAssistantMessage(sessionId: string): string {
+  const row = getDb()
+    .prepare(
+      `SELECT assistant.content
+       FROM messages assistant
+       JOIN messages user
+         ON user.turn_id = assistant.turn_id
+        AND user.role = 'user'
+       WHERE assistant.session_id = ?
+         AND assistant.role = 'assistant'
+         AND user.content NOT LIKE '/%'
+       ORDER BY assistant.created_at DESC
+       LIMIT 1`,
+    )
+    .get(sessionId) as { content?: string } | undefined;
+
+  if (!row?.content) {
+    return "No assistant response is available to copy yet.";
+  }
+
+  return [
+    "## Last assistant response",
+    "",
+    "Copy the markdown below:",
+    "",
+    codeBlock(row.content, "markdown"),
+  ].join("\n");
+}
+
+function slashNewSession(sessionId: string, name: string): string {
+  const db = getDb();
+  const current = db
+    .prepare(
+      `SELECT repo_id as repoId, agent, cwd
+       FROM sessions
+       WHERE id = ?`,
+    )
+    .get(sessionId) as
+    | { repoId: string; agent: string; cwd: string | null }
+    | undefined;
+
+  if (!current) return "Current Cockpit session was not found.";
+
+  const newSessionId = nanoid();
+  const trimmedName = name.trim();
+  db.prepare(
+    `INSERT INTO sessions (id, repo_id, agent, cwd, name)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    newSessionId,
+    current.repoId,
+    current.agent,
+    current.cwd ?? null,
+    trimmedName || null,
+  );
+
+  const title = trimmedName || `Session ${newSessionId.slice(0, 8)}`;
+  return [
+    "## New Cockpit session",
+    "",
+    `Created [${escapeMarkdownLinkText(title)}](/session/${encodeURIComponent(
+      newSessionId,
+    )}) in the same repo.`,
+    "",
+    "Open the link to switch to the clean session.",
+  ].join("\n");
+}
+
+async function slashFork(
+  managed: ManagedSession,
+  sessionId: string,
+): Promise<string> {
+  if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
+  const client = await getCodexAppServerClient();
+  const forked = await client.request("thread/fork", {
+    threadId: managed.codexThreadId,
+    excludeTurns: true,
+    persistExtendedHistory: true,
+  });
+
+  const thread = forked?.thread ?? forked;
+  const forkedThreadId = thread?.id;
+  if (!forkedThreadId) {
+    return "Codex did not return a forked thread id.";
+  }
+
+  const db = getDb();
+  const current = db
+    .prepare(
+      `SELECT repo_id as repoId, agent, cwd, name
+       FROM sessions
+       WHERE id = ?`,
+    )
+    .get(sessionId) as
+    | { repoId: string; agent: string; cwd: string | null; name: string | null }
+    | undefined;
+  if (!current) return "Current Cockpit session was not found.";
+
+  const newSessionId = nanoid();
+  const forkName = current.name ? `Fork of ${current.name}` : `Fork ${newSessionId.slice(0, 8)}`;
+  db.prepare(
+    `INSERT INTO sessions (id, repo_id, agent, cli_session_id, cwd, name)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    newSessionId,
+    current.repoId,
+    current.agent,
+    forkedThreadId,
+    current.cwd ?? null,
+    forkName,
+  );
+
+  return [
+    "## Forked session",
+    "",
+    `Created [${escapeMarkdownLinkText(forkName)}](/session/${encodeURIComponent(
+      newSessionId,
+    )}) from the current Codex thread.`,
+    "",
+    `- Codex thread: ${inlineCode(forkedThreadId)}`,
+  ].join("\n");
+}
+
+type SlashResumeRow = {
+  id: string;
+  repoId: string;
+  repoName: string;
+  repoPath: string;
+  agent: string;
+  cwd: string | null;
+  name: string | null;
+  status: string;
+  updatedAt: string;
+};
+
+async function slashResume(sessionId: string, args: string): Promise<string> {
+  const query = args.trim().toLowerCase();
+  const db = getDb();
+  const current = db
+    .prepare("SELECT repo_id as repoId FROM sessions WHERE id = ?")
+    .get(sessionId) as { repoId?: string } | undefined;
+
+  const rows = db
+    .prepare(
+      `SELECT s.id, s.repo_id as repoId, r.name as repoName, r.path as repoPath,
+              s.agent, s.cwd, s.name, s.status, s.updated_at as updatedAt
+       FROM sessions s
+       JOIN repos r ON r.id = s.repo_id
+       ORDER BY
+         CASE WHEN s.repo_id = ? THEN 0 ELSE 1 END,
+         s.updated_at DESC
+       LIMIT 100`,
+    )
+    .all(current?.repoId ?? "") as SlashResumeRow[];
+
+  const matches = query
+    ? rows.filter((row) => {
+        const haystack = [
+          row.id,
+          row.name,
+          row.repoName,
+          row.repoPath,
+          row.cwd,
+          row.agent,
+          row.status,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(query);
+      })
+    : rows;
+
+  const shown = matches.slice(0, 20);
+  if (!shown.length) {
+    return [
+      "## Resume sessions",
+      "",
+      query
+        ? `No Cockpit sessions matched \`${escapeMarkdownInline(args.trim())}\`.`
+        : "No Cockpit sessions found.",
+      "",
+      "Usage: `/resume` or `/resume <session name, repo, or id>`",
+    ].join("\n");
+  }
+
+  return [
+    "## Resume sessions",
+    "",
+    query
+      ? `Showing ${shown.length} of ${matches.length} matches for \`${escapeMarkdownInline(args.trim())}\`.`
+      : `Showing ${shown.length} recent Cockpit sessions.`,
+    "",
+    ...shown.map((row) => {
+      const title = row.name?.trim() || `Session ${row.id.slice(0, 8)}`;
+      const currentMarker = row.id === sessionId ? " _(current)_" : "";
+      const cwd = row.cwd ? ` · ${inlineCode(row.cwd)}` : "";
+      return `- [${escapeMarkdownLinkText(title)}](/session/${encodeURIComponent(
+        row.id,
+      )})${currentMarker} — ${inlineCode(row.repoName)} · ${inlineCode(
+        row.agent,
+      )} · ${inlineCode(row.status)} · ${formatUpdated(row.updatedAt)}${cwd}`;
+    }),
+    matches.length > shown.length
+      ? `\n_${matches.length - shown.length} more hidden. Narrow it with \`/resume <query>\`._`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 async function slashGoal(managed: ManagedSession, args: string): Promise<string> {
   if (!managed.codexThreadId) throw new Error("Missing Codex thread id");
   const client = await getCodexAppServerClient();
@@ -1388,6 +1660,29 @@ async function runGit(cwd: string, args: string | string[]): Promise<string> {
 
 function codeBlock(content: string, language = ""): string {
   return [`\`\`\`${language}`, content.replace(/```/g, "`\u200b``"), "```"].join("\n");
+}
+
+function inlineCode(value: string): string {
+  return `\`${String(value).replace(/`/g, "`\u200b")}\``;
+}
+
+function escapeMarkdownInline(value: string): string {
+  return value.replace(/[`*_{}[\]()#+\-.!|>]/g, "\\$&");
+}
+
+function escapeMarkdownLinkText(value: string): string {
+  return value.replace(/[[\]\\]/g, "\\$&");
+}
+
+function formatUpdated(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function createRunningTurn(sessionId: string, content: string): string {

@@ -1,8 +1,16 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@agent-cockpit/shared": fileURLToPath(
+        new URL("../shared/src/index.ts", import.meta.url),
+      ),
+    },
+  },
   plugins: [
     react(),
     VitePWA({
@@ -36,6 +44,9 @@ export default defineConfig({
         ],
       },
       workbox: {
+        cleanupOutdatedCaches: true,
+        skipWaiting: true,
+        clientsClaim: true,
         globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
         importScripts: ["push-sw.js"],
       },

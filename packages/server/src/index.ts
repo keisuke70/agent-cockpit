@@ -124,10 +124,20 @@ async function main() {
   // serve it from the same port so Tailscale Serve can expose a single origin.
   const webDist = resolve(__dirname, "..", "..", "web", "dist");
   if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist });
+    await app.register(fastifyStatic, {
+      root: webDist,
+      setHeaders(res, pathName) {
+        if (pathName.endsWith("index.html") || pathName.endsWith("sw.js") || pathName.endsWith("registerSW.js")) {
+          res.setHeader("Cache-Control", "no-cache");
+        } else if (pathName.includes("/assets/")) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
+      },
+    });
     // SPA fallback: any non-API GET serves index.html
     app.setNotFoundHandler((req, reply) => {
       if (req.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
+        reply.header("Cache-Control", "no-cache");
         return reply.sendFile("index.html");
       }
       reply.status(404).send({ error: "Not found" });
