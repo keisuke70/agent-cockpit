@@ -2,7 +2,7 @@
 // via vite-plugin-pwa workbox.importScripts.
 
 self.addEventListener("push", (event) => {
-  let payload = { title: "Agent Cockpit", body: "", sessionId: undefined };
+  let payload = { title: "Pocket Agent", body: "", sessionId: undefined };
   if (event.data) {
     try {
       payload = { ...payload, ...event.data.json() };

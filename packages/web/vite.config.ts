@@ -16,9 +16,9 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
-        name: "Agent Cockpit",
-        short_name: "Cockpit",
-        description: "Web UI for CLI AI agents",
+        name: "Pocket Agent",
+        short_name: "Pocket",
+        description: "Mobile web UI for CLI AI agents",
         theme_color: "#111111",
         background_color: "#111111",
         display: "standalone",

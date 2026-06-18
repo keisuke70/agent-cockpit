@@ -1,6 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { nanoid } from "nanoid";
+import { basename } from "node:path";
 import { createSessionSchema } from "@agent-cockpit/shared";
+import type { SessionStatus } from "@agent-cockpit/shared";
+import { getCodexAppServerClient } from "../codex/app-server-client.js";
 import { getDb } from "../db.js";
 import { getManaged, removeManaged } from "../process-manager.js";
 import { removeScheduleRunner } from "../scheduler.js";
@@ -12,25 +15,216 @@ function detachManagedProcessListeners(sessionId: string) {
   proc?.removeAllListeners("close");
 }
 
+function mapSessionRow(row: any) {
+  if (!row) return row;
+  const {
+    codexModel,
+    codexReasoningEffort,
+    codexApprovalPolicy,
+    codexApprovalsReviewer,
+    codexSandboxMode,
+    codexCollaborationMode,
+    codexAdditionalWritableRoots,
+    ...session
+  } = row;
+  return {
+    ...session,
+    codexSettings: {
+      model: codexModel ?? null,
+      reasoningEffort: codexReasoningEffort ?? null,
+      approvalPolicy: codexApprovalPolicy ?? "never",
+      approvalsReviewer: codexApprovalsReviewer ?? "user",
+      sandboxMode: codexSandboxMode ?? "danger-full-access",
+      collaborationMode: codexCollaborationMode ?? "default",
+      additionalWritableRoots: parseJsonStringArray(codexAdditionalWritableRoots),
+    },
+  };
+}
+
+function parseJsonStringArray(value: unknown): string[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+interface CodexThreadSummary {
+  id?: unknown;
+  preview?: unknown;
+  name?: unknown;
+  cwd?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  status?: { type?: unknown };
+}
+
+function isoTimestampFromUnixSeconds(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return new Date().toISOString();
+  }
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function codexThreadStatusToSessionStatus(status: unknown): SessionStatus {
+  return status === "running" ? "running" : "idle";
+}
+
+
+
+function hasLocalRunningTurn(sessionId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT id FROM turns WHERE session_id = ? AND status = 'running' LIMIT 1")
+    .get(sessionId);
+  return Boolean(row);
+}
+
+function shouldPreserveLocalRunningStatus(sessionId: string, existingStatus: SessionStatus, threadStatus: SessionStatus): boolean {
+  return existingStatus === "running" && threadStatus !== "running" && hasLocalRunningTurn(sessionId);
+}
+function shouldAdoptCodexThreadUpdatedAt(existing: { name: string | null; status: SessionStatus }, next: { name: string | null; status: SessionStatus }): boolean {
+  // Codex app-server may advance thread.updatedAt when a thread is merely
+  // resumed/opened. Treat only visible activity signals as recency changes so
+  // the session list does not jump just because the user inspected a session.
+  return (next.name ?? null) !== (existing.name ?? null) || next.status !== existing.status;
+}
+
+function displayNameFromCodexThread(thread: CodexThreadSummary): string | null {
+  const name = typeof thread.name === "string" ? thread.name.trim() : "";
+  // Codex app-server generates canonical thread titles. Do not fall back to
+  // preview text here: preview is transcript content and produces noisy,
+  // unstable Cockpit session names.
+  return name || null;
+}
+
+function resolveRepoForCodexThread(cwd: string): string {
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT id FROM repos WHERE path = ?")
+    .get(cwd) as { id: string } | undefined;
+  if (existing) return existing.id;
+
+  const id = nanoid();
+  const name = basename(cwd.replace(/\/+$/, "")) || cwd;
+  db.prepare("INSERT INTO repos (id, name, path) VALUES (?, ?, ?)").run(id, name, cwd);
+  return id;
+}
+
+async function syncCodexThreadsIntoSessions(opts: { repoId?: string } = {}) {
+  const db = getDb();
+  let cwdFilter: string | null = null;
+  if (opts.repoId) {
+    const repo = db
+      .prepare("SELECT path FROM repos WHERE id = ?")
+      .get(opts.repoId) as { path: string } | undefined;
+    if (!repo) return;
+    cwdFilter = repo?.path ?? null;
+  }
+
+  try {
+    const client = await getCodexAppServerClient();
+    const result = await client.request(
+      "thread/list",
+      cwdFilter ? { cwd: cwdFilter } : {},
+    );
+    const threads = Array.isArray(result?.data) ? result.data as CodexThreadSummary[] : [];
+
+    const upsert = db.transaction((items: CodexThreadSummary[]) => {
+      for (const thread of items) {
+        if (typeof thread.id !== "string" || !thread.id.trim()) continue;
+        const cwd = typeof thread.cwd === "string" && thread.cwd.trim() ? thread.cwd : cwdFilter;
+        if (!cwd) continue;
+        if (cwdFilter && cwd !== cwdFilter) continue;
+
+        const existing = db
+          .prepare("SELECT id, name, status, updated_at as updatedAt FROM sessions WHERE agent = 'codex' AND cli_session_id = ?")
+          .get(thread.id) as { id: string; name: string | null; status: SessionStatus; updatedAt: string } | undefined;
+
+        const repoId = opts.repoId ?? resolveRepoForCodexThread(cwd);
+        const name = displayNameFromCodexThread(thread);
+        const createdAt = isoTimestampFromUnixSeconds(thread.createdAt);
+        const updatedAt = isoTimestampFromUnixSeconds(thread.updatedAt);
+        const threadStatus = codexThreadStatusToSessionStatus(thread.status?.type);
+
+        if (existing) {
+          const status = shouldPreserveLocalRunningStatus(existing.id, existing.status, threadStatus)
+            ? existing.status
+            : threadStatus;
+          const nextName = name ?? existing.name;
+          const nextUpdatedAt = shouldAdoptCodexThreadUpdatedAt(
+            existing,
+            { name: nextName, status },
+          )
+            ? updatedAt
+            : existing.updatedAt;
+          db.prepare(
+            `UPDATE sessions
+             SET repo_id = ?,
+                 cwd = COALESCE(?, cwd),
+                 name = COALESCE(?, name),
+                 status = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+          ).run(repoId, cwd, name, status, nextUpdatedAt, existing.id);
+          continue;
+        }
+
+        db.prepare(
+          `INSERT INTO sessions (
+             id, repo_id, agent, cli_session_id, cwd, name, status, created_at, updated_at
+           )
+           VALUES (?, ?, 'codex', ?, ?, ?, ?, ?, ?)`,
+        ).run(nanoid(), repoId, thread.id, cwd, name, threadStatus, createdAt, updatedAt);
+      }
+    });
+
+    upsert(threads);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[sessions] Failed to sync Codex thread/list into sessions: ${message}`);
+  }
+}
+
 export async function sessionRoutes(app: FastifyInstance) {
-  app.get<{ Querystring: { repoId?: string } }>("/api/sessions", (req) => {
+  app.get<{ Querystring: { repoId?: string } }>("/api/sessions", async (req) => {
     const db = getDb();
+    await syncCodexThreadsIntoSessions({ repoId: req.query.repoId });
+
     if (req.query.repoId) {
-      return db
+      const rows = db
         .prepare(
           `SELECT id, repo_id as repoId, agent, cli_session_id as cliSessionId,
-                  cwd, name, status, created_at as createdAt, updated_at as updatedAt
+                  cwd, name, status, created_at as createdAt, updated_at as updatedAt,
+                  codex_model as codexModel,
+                  codex_reasoning_effort as codexReasoningEffort,
+                  codex_approval_policy as codexApprovalPolicy,
+                  codex_approvals_reviewer as codexApprovalsReviewer,
+                  codex_sandbox_mode as codexSandboxMode,
+                  codex_collaboration_mode as codexCollaborationMode,
+                  codex_additional_writable_roots as codexAdditionalWritableRoots
            FROM sessions WHERE repo_id = ? ORDER BY updated_at DESC`,
         )
         .all(req.query.repoId);
+      return rows.map(mapSessionRow);
     }
-    return db
+    const rows = db
       .prepare(
         `SELECT id, repo_id as repoId, agent, cli_session_id as cliSessionId,
-                cwd, name, status, created_at as createdAt, updated_at as updatedAt
+                cwd, name, status, created_at as createdAt, updated_at as updatedAt,
+                codex_model as codexModel,
+                codex_reasoning_effort as codexReasoningEffort,
+                codex_approval_policy as codexApprovalPolicy,
+                codex_approvals_reviewer as codexApprovalsReviewer,
+                codex_sandbox_mode as codexSandboxMode,
+                codex_collaboration_mode as codexCollaborationMode,
+                codex_additional_writable_roots as codexAdditionalWritableRoots
          FROM sessions ORDER BY updated_at DESC`,
       )
       .all();
+    return rows.map(mapSessionRow);
   });
 
   app.get<{ Params: { id: string } }>("/api/sessions/:id", (req, reply) => {
@@ -38,14 +232,21 @@ export async function sessionRoutes(app: FastifyInstance) {
     const session = db
       .prepare(
         `SELECT id, repo_id as repoId, agent, cli_session_id as cliSessionId,
-                cwd, name, status, created_at as createdAt, updated_at as updatedAt
+                cwd, name, status, created_at as createdAt, updated_at as updatedAt,
+                codex_model as codexModel,
+                codex_reasoning_effort as codexReasoningEffort,
+                codex_approval_policy as codexApprovalPolicy,
+                codex_approvals_reviewer as codexApprovalsReviewer,
+                codex_sandbox_mode as codexSandboxMode,
+                codex_collaboration_mode as codexCollaborationMode,
+                codex_additional_writable_roots as codexAdditionalWritableRoots
          FROM sessions WHERE id = ?`,
       )
       .get(req.params.id);
     if (!session) {
       return reply.status(404).send({ error: "Not found" });
     }
-    return session;
+    return mapSessionRow(session);
   });
 
   app.post("/api/sessions", (req, reply) => {

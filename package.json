@@ -13,7 +13,9 @@
     "build": "npm run build -w @agent-cockpit/shared && npm run build -w @agent-cockpit/server && npm run build -w @agent-cockpit/web",
     "typecheck": "tsc --build",
     "restart": "bash scripts/restart-launchd.sh",
-    "deploy": "npm run build && npm run restart"
+    "deploy": "npm run build && npm run restart",
+    "check:codex-sync": "node scripts/check-codex-turn-sync.mjs && node scripts/check-codex-status-authority.mjs",
+    "check:codex-status-authority": "node scripts/check-codex-status-authority.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

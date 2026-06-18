@@ -1,15 +1,31 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import type { Message } from "@agent-cockpit/shared";
+import type { Message, PermissionRequestEvent } from "@agent-cockpit/shared";
 import type { ToolActivity } from "../hooks/useWebSocket.js";
 
 interface StreamOutputProps {
   messages: Message[];
   streamingText: string;
   activeTools?: ToolActivity[];
+  pendingPermissions?: PermissionRequestEvent[];
+  onApprovePermission?: (id: string) => void;
+  onApprovePermissionForSession?: (id: string) => void;
+  onRejectPermission?: (id: string) => void;
+  onAnswerUserInput?: (id: string, answer: string) => void;
+  onRetryDesyncedTurn?: (turnId: string) => void;
 }
 
-export function StreamOutput({ messages, streamingText, activeTools }: StreamOutputProps) {
+export function StreamOutput({
+  messages,
+  streamingText,
+  activeTools,
+  pendingPermissions = [],
+  onApprovePermission,
+  onApprovePermissionForSession,
+  onRejectPermission,
+  onAnswerUserInput,
+  onRetryDesyncedTurn,
+}: StreamOutputProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolled = useRef(false);
@@ -29,7 +45,7 @@ export function StreamOutput({ messages, streamingText, activeTools }: StreamOut
     if (!userScrolled.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, streamingText]);
+  }, [messages, streamingText, pendingPermissions.length]);
 
   return (
     <div
@@ -56,11 +72,15 @@ export function StreamOutput({ messages, streamingText, activeTools }: StreamOut
       )}
 
       {messages.map((msg) => (
-        <MessageBubble key={msg.id} role={msg.role} content={msg.content} />
+        <MessageBubble
+          key={msg.id}
+          message={msg}
+          onRetryDesyncedTurn={onRetryDesyncedTurn}
+        />
       ))}
 
       {streamingText && (
-        <MessageBubble role="assistant" content={streamingText} streaming />
+        <MessageBubble message={{ id: "streaming", sessionId: "", turnId: null, role: "assistant", content: streamingText, createdAt: new Date().toISOString() }} streaming />
       )}
 
       {activeTools && activeTools.length > 0 && (
@@ -79,21 +99,113 @@ export function StreamOutput({ messages, streamingText, activeTools }: StreamOut
         </div>
       )}
 
+      {pendingPermissions.map((request) => (
+        <PermissionCard
+          key={request.id}
+          request={request}
+          onApprove={() => onApprovePermission?.(request.id)}
+          onApproveForSession={
+            request.allowForSession
+              ? () => onApprovePermissionForSession?.(request.id)
+              : undefined
+          }
+          onReject={() => onRejectPermission?.(request.id)}
+          onAnswer={(answer) => onAnswerUserInput?.(request.id, answer)}
+        />
+      ))}
+
       <div ref={bottomRef} />
     </div>
   );
 }
 
-function MessageBubble({
-  role,
-  content,
-  streaming,
+function PermissionCard({
+  request,
+  onApprove,
+  onApproveForSession,
+  onReject,
+  onAnswer,
 }: {
-  role: string;
-  content: string;
-  streaming?: boolean;
+  request: PermissionRequestEvent;
+  onApprove: () => void;
+  onApproveForSession?: () => void;
+  onReject: () => void;
+  onAnswer: (answer: string) => void;
 }) {
-  const isUser = role === "user";
+  const [answer, setAnswer] = useState("");
+  const needsText = request.kind === "questions" || request.kind === "elicitation";
+  return (
+    <section className="permission-card" aria-label={`${request.toolName} permission request`}>
+      <div className="permission-card-header">
+        <strong>{permissionTitle(request)}</strong>
+        <span>{request.kind}</span>
+      </div>
+      <pre className="permission-card-input">
+        {JSON.stringify(request.input, null, 2)}
+      </pre>
+      {needsText && (
+        <label className="permission-answer-label">
+          Answer
+          <input
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder="Type response for Codex"
+          />
+        </label>
+      )}
+      <div className="permission-card-actions">
+        {needsText ? (
+          <button type="button" onClick={() => onAnswer(answer)}>
+            Send answer
+          </button>
+        ) : (
+          <>
+            <button type="button" className="permission-approve" onClick={onApprove}>
+              Approve
+            </button>
+            {onApproveForSession && (
+              <button type="button" onClick={onApproveForSession}>
+                Approve for session
+              </button>
+            )}
+          </>
+        )}
+        <button type="button" className="permission-reject" onClick={onReject}>
+          Reject
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function permissionTitle(request: PermissionRequestEvent): string {
+  switch (request.kind) {
+    case "command":
+      return "Codex wants to run a command";
+    case "file":
+      return "Codex wants to change files";
+    case "permissions":
+      return "Codex requests broader permissions";
+    case "questions":
+      return "Codex needs user input";
+    case "elicitation":
+      return "A plugin/app requests input";
+    case "plan":
+      return "Codex plan approval";
+  }
+}
+
+function MessageBubble({
+  message,
+  streaming,
+  onRetryDesyncedTurn,
+}: {
+  message: Message;
+  streaming?: boolean;
+  onRetryDesyncedTurn?: (turnId: string) => void;
+}) {
+  const isUser = message.role === "user";
+  const isDesynced = message.codexSyncStatus === "desynced" && Boolean(message.turnId);
 
   return (
     <div
@@ -109,10 +221,21 @@ function MessageBubble({
       }}
     >
       {isUser ? (
-        <span style={{ whiteSpace: "pre-wrap" }}>{content}</span>
+        <span style={{ whiteSpace: "pre-wrap" }}>{message.content}</span>
       ) : (
         <div className="markdown-body">
-          <ReactMarkdown>{content}</ReactMarkdown>
+          <ReactMarkdown>{message.content}</ReactMarkdown>
+        </div>
+      )}
+      {isDesynced && (
+        <div className="message-sync-warning" role="status" aria-live="polite">
+          <span>Saved locally, not confirmed in Codex.</span>
+          <button
+            type="button"
+            onClick={() => message.turnId && onRetryDesyncedTurn?.(message.turnId)}
+          >
+            Retry this message
+          </button>
         </div>
       )}
       {streaming && (

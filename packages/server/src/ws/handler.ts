@@ -5,8 +5,12 @@ import { getDb } from "../db.js";
 import {
   ensureManaged,
   getLastUserMessage,
+  listPendingPermissions,
+  loadSessionCapabilities,
   listDisplayMessagesForSession,
   refreshDisplayTranscript,
+  resolvePermissionRequest,
+  retryDesyncedTurn,
   sendPrompt,
   stopSession,
 } from "./session-bridge.js";
@@ -93,8 +97,8 @@ export async function wsRoutes(app: FastifyInstance) {
       const replayStartSeq = managed.seq;
       if (lastSeqParam) {
         const lastSeq = parseInt(lastSeqParam, 10);
-        const catchUp = getEventsSince(managed, lastSeq);
-        if (catchUp) {
+        const catchUp = Number.isFinite(lastSeq) ? getEventsSince(managed, lastSeq) : null;
+        if (catchUp && catchUp.length > 0 && lastSeq <= managed.seq) {
           let lastSentSeq = lastSeq;
           for (const event of catchUp) {
             socket.send(JSON.stringify(event));
@@ -103,6 +107,11 @@ export async function wsRoutes(app: FastifyInstance) {
           }
           flushQueuedEventsAfter(lastSentSeq);
         } else {
+          // If there is no catch-up event to send, the client still needs an
+          // authoritative status. This is especially important after server
+          // restart, where the browser reconnects with an old lastSeq while the
+          // new in-memory buffer starts empty; without a snapshot the UI remains
+          // stuck in `connecting`.
           const snapshot = await sendSnapshotMsg(socket, managed, sessionId, replayStartSeq);
           flushQueuedEventsAfter(replayStartSeq, snapshot);
         }
@@ -137,8 +146,17 @@ export async function wsRoutes(app: FastifyInstance) {
 
         switch (msg.type) {
           case "send_prompt":
-            if (msg.content?.trim()) {
-              const result = sendPrompt(current, sessionId!, msg.content.trim());
+            if (
+              msg.content?.trim() ||
+              msg.images?.length ||
+              msg.skills?.length ||
+              msg.mentions?.length
+            ) {
+              const result = sendPrompt(current, sessionId!, msg.content ?? "", {
+                images: msg.images,
+                skills: msg.skills,
+                mentions: msg.mentions,
+              });
               if (!result.ok) {
                 socket.send(JSON.stringify({ type: "error", message: result.error, seq: 0 }));
               }
@@ -150,10 +168,17 @@ export async function wsRoutes(app: FastifyInstance) {
           case "retry": {
             const lastUserMsg = await getLastUserMessage(current, sessionId!);
             if (lastUserMsg) {
-              const result = sendPrompt(current, sessionId!, lastUserMsg);
+              const result = sendPrompt(current, sessionId!, lastUserMsg, { allowDuplicate: true });
               if (!result.ok) {
                 socket.send(JSON.stringify({ type: "error", message: result.error, seq: 0 }));
               }
+            }
+            break;
+          }
+          case "retry_desynced_turn": {
+            const result = await retryDesyncedTurn(current, sessionId!, msg.turnId);
+            if (!result.ok) {
+              socket.send(JSON.stringify({ type: "error", message: result.error, seq: 0 }));
             }
             break;
           }
@@ -161,6 +186,11 @@ export async function wsRoutes(app: FastifyInstance) {
           case "sync_messages":
             try {
               await refreshDisplayTranscript(current, sessionId!);
+              broadcastEvent(current, {
+                type: "session_capabilities",
+                capabilities: await loadSessionCapabilities(current, sessionId!),
+                seq: nextSeq(current),
+              });
             } catch (err) {
               const message = err instanceof Error ? err.message : "Refresh failed";
               broadcastEvent(current, {
@@ -169,6 +199,18 @@ export async function wsRoutes(app: FastifyInstance) {
                 seq: nextSeq(current),
               });
             }
+            break;
+          case "approve_permission":
+            await resolvePermissionRequest(current, msg.id, "approve");
+            break;
+          case "approve_permission_for_session":
+            await resolvePermissionRequest(current, msg.id, "approve_session");
+            break;
+          case "reject_permission":
+            await resolvePermissionRequest(current, msg.id, "reject", msg.message);
+            break;
+          case "answer_user_input":
+            await resolvePermissionRequest(current, msg.id, "answer", msg.answer);
             break;
         }
       });
@@ -206,6 +248,9 @@ async function sendSnapshotMsg(
     sessionName: session?.name ?? display.threadName ?? null,
     transcriptSource: display.source,
     transcriptWarning: display.warning,
+    capabilities: await loadSessionCapabilities(managed, sessionId),
+    pendingPermissions: listPendingPermissions(managed),
+    activeTools: managed.activeTools ?? [],
   };
 
   socket.send(JSON.stringify(snapshot));

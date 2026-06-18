@@ -73,7 +73,7 @@ function LoginScreen({
         gap: 16,
       }}
     >
-      <h1 style={{ fontSize: 24, fontWeight: 600 }}>Agent Cockpit</h1>
+      <h1 style={{ fontSize: 24, fontWeight: 600 }}>Pocket Agent</h1>
       <p id={hintId} style={{ color: "var(--text-muted)", textAlign: "center" }}>
         Enter the auth token from the server console.
       </p>
@@ -140,7 +140,7 @@ function ConnectionScreen({ error, onRetry }: { error: AuthError; onRetry: () =>
         textAlign: "center",
       }}
     >
-      <h1 style={{ fontSize: 24, fontWeight: 600 }}>Agent Cockpit</h1>
+      <h1 style={{ fontSize: 24, fontWeight: 600 }}>Pocket Agent</h1>
       <p role="status" style={{ color: "var(--text-muted)", maxWidth: 420, margin: 0 }}>
         {error.message}
       </p>

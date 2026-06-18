@@ -1,6 +1,13 @@
 import type { AdapterHandle } from "./adapters/base.js";
 import type { CLIAdapter } from "./adapters/base.js";
-import type { LobbyEvent, ServerEvent } from "@agent-cockpit/shared";
+import type { ActiveToolActivity, LobbyEvent, PermissionRequestEvent, ServerEvent } from "@agent-cockpit/shared";
+
+export interface PendingPermissionRequest extends PermissionRequestEvent {
+  requestId: string | number;
+  method: string;
+  params?: any;
+  requestedPermissions?: Record<string, unknown>;
+}
 
 export interface ManagedSession {
   sessionId: string;
@@ -8,10 +15,22 @@ export interface ManagedSession {
   adapter?: CLIAdapter;
   handle?: AdapterHandle;
   codexThreadId?: string;
+  codexAppServerGeneration?: number | null;
   codexActiveTurnId?: string | null;
   codexStopRequested?: boolean;
   codexStoppingTurnId?: string | null;
+  codexLocalTurnByCodexTurnId?: Map<string, string>;
+  codexCodexTurnByLocalTurnId?: Map<string, string>;
+  codexPendingLocalTurnId?: string | null;
+  codexRealtimeState?: "idle" | "starting" | "active" | "stopping" | "error";
+  codexRealtimeError?: string | null;
+  codexRealtimeStartInFlight?: boolean;
+  codexRealtimeStartToken?: string | null;
+  codexThreadUnhealthy?: boolean;
+  codexThreadFresh?: boolean;
   cleanup?: () => void;
+  pendingPermissions?: Map<string, PendingPermissionRequest>;
+  activeTools?: ActiveToolActivity[];
   seq: number;
   eventBuffer: ServerEvent[];
   listeners: Set<(event: ServerEvent) => void>;

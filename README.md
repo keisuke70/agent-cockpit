@@ -1,6 +1,6 @@
-# agent-cockpit
+# Pocket Agent
 
-自作の「スマホから操作しやすい AI エージェント用 web cockpit」を作るための専用リポジトリ。
+自作の「スマホから操作しやすい AI エージェント用 web UI」を作るための専用リポジトリ。
 
 ## セットアップ
 
@@ -39,7 +39,7 @@ cd packages/web && npm run build && cd -
 
 ### 常駐運用 (launchd)
 
-Mac 起動時に自動で agent-cockpit を立ち上げる。
+Mac 起動時に自動で Pocket Agent を立ち上げる。
 
 ```bash
 # 初回 / 再ビルド時

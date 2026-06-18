@@ -27,10 +27,17 @@ export function SessionPage() {
     sessionName,
     refreshingTranscript,
     transcriptRefreshError,
+    capabilities,
+    pendingPermissions,
     sendPrompt,
     refreshTranscript,
     stop,
     retry,
+    retryDesyncedTurn,
+    approvePermission,
+    approvePermissionForSession,
+    rejectPermission,
+    answerUserInput,
   } = useWebSocket(id!);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [isDeleting, setIsDeleting] = useState(false);
@@ -120,7 +127,7 @@ export function SessionPage() {
             )}
             {transcriptRefreshError && (
               <span role="alert" style={{ color: "var(--danger)" }}>
-                Refresh: {transcriptRefreshError}
+                Notice: {transcriptRefreshError}
               </span>
             )}
           </div>
@@ -185,12 +192,28 @@ export function SessionPage() {
         }}
       >
         {viewMode === "chat" ? (
-          <StreamOutput messages={messages} streamingText={streamingText} activeTools={activeTools} />
+          <StreamOutput
+            messages={messages}
+            streamingText={streamingText}
+            activeTools={activeTools}
+            pendingPermissions={pendingPermissions}
+            onApprovePermission={approvePermission}
+            onApprovePermissionForSession={approvePermissionForSession}
+            onRejectPermission={rejectPermission}
+            onAnswerUserInput={answerUserInput}
+            onRetryDesyncedTurn={retryDesyncedTurn}
+          />
         ) : (
           <TerminalView data={rawStdout} />
         )}
       </div>
-      <Composer status={status} onSend={sendPrompt} onStop={stop} onRetry={retry} />
+        <Composer
+          status={status}
+          capabilities={capabilities}
+          onSend={sendPrompt}
+          onStop={stop}
+          onRetry={retry}
+      />
     </>
   );
 }

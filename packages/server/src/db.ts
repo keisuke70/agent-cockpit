@@ -107,12 +107,33 @@ function migrate(db: Database.Database) {
 
   ensureColumn(db, "messages", "external_id", "TEXT");
   ensureColumn(db, "messages", "source", "TEXT");
+  ensureColumn(db, "turns", "codex_turn_id", "TEXT");
+  ensureColumn(db, "turns", "codex_sync_status", "TEXT");
+  ensureColumn(db, "turns", "codex_submitted_at", "TEXT");
+  ensureColumn(db, "turns", "codex_materialized_at", "TEXT");
+  ensureColumn(db, "turns", "codex_last_checked_at", "TEXT");
+  ensureColumn(db, "turns", "codex_sync_error", "TEXT");
+  ensureColumn(db, "turns", "retry_of_turn_id", "TEXT");
   ensureColumn(db, "sessions", "codex_unreadable_thread_id", "TEXT");
   ensureColumn(db, "sessions", "codex_unreadable_at", "TEXT");
+  ensureColumn(db, "sessions", "codex_model", "TEXT");
+  ensureColumn(db, "sessions", "codex_reasoning_effort", "TEXT");
+  ensureColumn(db, "sessions", "codex_approval_policy", "TEXT");
+  ensureColumn(db, "sessions", "codex_approvals_reviewer", "TEXT");
+  ensureColumn(db, "sessions", "codex_sandbox_mode", "TEXT");
+  ensureColumn(db, "sessions", "codex_collaboration_mode", "TEXT");
+  ensureColumn(db, "sessions", "codex_additional_writable_roots", "TEXT");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_external
     ON messages(session_id, external_id)
     WHERE external_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_turns_session_codex_sync
+    ON turns(session_id, codex_sync_status, started_at);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_codex_turn
+    ON turns(session_id, codex_turn_id)
+    WHERE codex_turn_id IS NOT NULL;
   `);
 }
 

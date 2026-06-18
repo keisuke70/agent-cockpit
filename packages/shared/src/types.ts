@@ -7,14 +7,75 @@ export type SessionStatus = "idle" | "running" | "stopped" | "error";
 /** Turn status */
 export type TurnStatus = "running" | "complete" | "error" | "stopped";
 
+export type CodexTurnSyncStatus =
+  | "local_only"
+  | "submit_inflight"
+  | "submitted"
+  | "materialized"
+  | "assistant_started"
+  | "assistant_completed"
+  | "complete"
+  | "stopped"
+  | "error"
+  | "desynced"
+  | "retried";
+
+export type CodexReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+export type CodexApprovalPolicy = "never" | "on-request" | "on-failure" | "untrusted";
+export type CodexApprovalsReviewer = "user" | "auto_review" | "guardian_subagent";
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+export type CodexCollaborationMode = "default" | "plan";
+
+export interface CodexSessionSettings {
+  model: string | null;
+  reasoningEffort: CodexReasoningEffort | null;
+  approvalPolicy: CodexApprovalPolicy;
+  approvalsReviewer: CodexApprovalsReviewer;
+  sandboxMode: CodexSandboxMode;
+  collaborationMode: CodexCollaborationMode;
+  additionalWritableRoots: string[];
+}
+
+export interface CodexSkillEntity {
+  name: string;
+  path: string;
+  description?: string;
+  defaultPrompt?: string | null;
+}
+
+export interface CodexMentionEntity {
+  id?: string;
+  name: string;
+  path: string;
+  description?: string;
+  kind: "app" | "plugin";
+}
+
+export interface CodexModelOption {
+  id: string;
+  label: string;
+  isDefault?: boolean;
+  defaultReasoningEffort?: string | null;
+}
+
+export interface SessionCapabilities {
+  codexSettings?: CodexSessionSettings;
+  models?: CodexModelOption[];
+  skills?: CodexSkillEntity[];
+  mentions?: CodexMentionEntity[];
+  warning?: string;
+}
+
 /** Repo record */
 export interface Repo {
   id: string;
   name: string;
   path: string;
   createdAt: string;
+  codexSyncStatus?: CodexTurnSyncStatus | null;
+  codexSyncError?: string | null;
+  retryOfTurnId?: string | null;
 }
-
 
 /** Workspace root setting used for cross-repo sessions */
 export interface WorkspaceSettings {
@@ -33,6 +94,7 @@ export interface Session {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  codexSettings?: CodexSessionSettings;
 }
 
 /** Turn record */
@@ -45,6 +107,13 @@ export interface Turn {
   finishedAt: string | null;
   costUsd: number | null;
   metadata: string | null;
+  codexTurnId?: string | null;
+  codexSyncStatus?: CodexTurnSyncStatus | null;
+  codexSubmittedAt?: string | null;
+  codexMaterializedAt?: string | null;
+  codexLastCheckedAt?: string | null;
+  codexSyncError?: string | null;
+  retryOfTurnId?: string | null;
 }
 
 /** Git status snapshot for a repo path */
@@ -68,6 +137,9 @@ export interface Schedule {
   lastRun: string | null;
   lastStatus: ScheduleStatus | null;
   createdAt: string;
+  codexSyncStatus?: CodexTurnSyncStatus | null;
+  codexSyncError?: string | null;
+  retryOfTurnId?: string | null;
 }
 
 /** Message record */
@@ -78,4 +150,7 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: string;
+  codexSyncStatus?: CodexTurnSyncStatus | null;
+  codexSyncError?: string | null;
+  retryOfTurnId?: string | null;
 }

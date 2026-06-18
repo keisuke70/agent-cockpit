@@ -61,14 +61,16 @@ function markInterruptedWorkStopped(app: FastifyInstance) {
     .prepare(
       `UPDATE turns
        SET status = 'stopped', finished_at = COALESCE(finished_at, datetime('now'))
-       WHERE status = 'running'`,
+       WHERE status = 'running'
+         AND session_id IN (SELECT id FROM sessions WHERE agent != 'codex')`,
     )
     .run();
   const stoppedSessions = db
     .prepare(
       `UPDATE sessions
        SET status = 'stopped', updated_at = datetime('now')
-       WHERE status = 'running'`,
+       WHERE status = 'running'
+         AND agent != 'codex'`,
     )
     .run();
 
@@ -78,7 +80,7 @@ function markInterruptedWorkStopped(app: FastifyInstance) {
         stoppedTurns: stoppedTurns.changes,
         stoppedSessions: stoppedSessions.changes,
       },
-      "Recovered interrupted Agent Cockpit work after server startup",
+      "Recovered interrupted Pocket Agent work after server startup",
     );
   }
 }
@@ -197,11 +199,11 @@ async function main() {
   // into terminal scrollback on every restart.
   if (TOKEN_FRESHLY_CREATED) {
     process.stdout.write(
-      `\nAgent Cockpit ready: http://${HOST}:${PORT}\nAuth token (first run only): ${AUTH_TOKEN}\nStored at: ${TOKEN_FILE}\n\n`,
+      `\nPocket Agent ready: http://${HOST}:${PORT}\nAuth token (first run only): ${AUTH_TOKEN}\nStored at: ${TOKEN_FILE}\n\n`,
     );
   } else {
     process.stdout.write(
-      `\nAgent Cockpit ready: http://${HOST}:${PORT}\nAuth token: see ${TOKEN_FILE}\n\n`,
+      `\nPocket Agent ready: http://${HOST}:${PORT}\nAuth token: see ${TOKEN_FILE}\n\n`,
     );
   }
 }

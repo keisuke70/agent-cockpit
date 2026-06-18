@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import type { Message, SessionStatus, ServerEvent } from "@agent-cockpit/shared";
+import type {
+  ActiveToolActivity,
+  Message,
+  PermissionRequestEvent,
+  PromptImageInput,
+  PromptMentionInput,
+  PromptSkillInput,
+  ServerEvent,
+  SessionCapabilities,
+  SessionStatus,
+} from "@agent-cockpit/shared";
 
-export interface ToolActivity {
-  tool: string;
-  input: unknown;
-  timestamp: number;
-}
+export type ToolActivity = ActiveToolActivity;
 
 interface UseWebSocketResult {
   messages: Message[];
@@ -18,10 +24,24 @@ interface UseWebSocketResult {
   sessionName: string | null | undefined;
   refreshingTranscript: boolean;
   transcriptRefreshError: string;
-  sendPrompt: (text: string) => void;
+  capabilities: SessionCapabilities | null;
+  pendingPermissions: PermissionRequestEvent[];
+  sendPrompt: (
+    text: string,
+    options?: {
+      images?: PromptImageInput[];
+      skills?: PromptSkillInput[];
+      mentions?: PromptMentionInput[];
+    },
+  ) => void;
   refreshTranscript: () => void;
   stop: () => void;
   retry: () => void;
+  retryDesyncedTurn: (turnId: string) => void;
+  approvePermission: (id: string) => void;
+  approvePermissionForSession: (id: string) => void;
+  rejectPermission: (id: string) => void;
+  answerUserInput: (id: string, answer: string) => void;
 }
 
 /** Cap the in-memory raw stdout buffer to keep memory bounded. */
@@ -36,8 +56,11 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   const [sessionName, setSessionName] = useState<string | null | undefined>(undefined);
   const [refreshingTranscript, setRefreshingTranscript] = useState(false);
   const [transcriptRefreshError, setTranscriptRefreshError] = useState("");
+  const [capabilities, setCapabilities] = useState<SessionCapabilities | null>(null);
+  const [pendingPermissions, setPendingPermissions] = useState<PermissionRequestEvent[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
+  const optimisticIdsRef = useRef<string[]>([]);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const intentionalClose = useRef(false);
@@ -62,7 +85,10 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
         reconnectTimer.current = null;
       }
       reconnectAttempts.current = 0;
-      setStatus("idle");
+      // Do not optimistically report "ready" on TCP/WebSocket open. The
+      // authoritative session state arrives in the snapshot/catch-up stream;
+      // flipping to idle here makes an actively running Codex turn appear ready
+      // during slow transcript reads or reconnects.
     };
 
     ws.onmessage = (e) => {
@@ -74,16 +100,21 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
 
       switch (event.type) {
         case "snapshot":
+          optimisticIdsRef.current = [];
           setMessages(event.messages);
           setStreamingText("");
           lastSeqRef.current = event.lastSeq;
           setStatus(event.status);
           setSessionName(event.sessionName);
+          setCapabilities(event.capabilities ?? null);
+          setPendingPermissions(event.pendingPermissions ?? []);
+          setActiveTools(event.status === "running" ? event.activeTools ?? [] : []);
           setRefreshingTranscript(false);
           setTranscriptRefreshError(event.transcriptWarning ?? "");
           break;
 
         case "transcript_refreshed":
+          optimisticIdsRef.current = [];
           setMessages(event.messages);
           setRefreshingTranscript(false);
           setTranscriptRefreshError(event.transcriptWarning ?? "");
@@ -92,6 +123,23 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
         case "transcript_refresh_failed":
           setRefreshingTranscript(false);
           setTranscriptRefreshError(event.message);
+          break;
+
+        case "session_capabilities":
+          setCapabilities(event.capabilities);
+          break;
+
+        case "permission_request":
+          setPendingPermissions((prev) => [
+            ...prev.filter((request) => request.id !== event.id),
+            event,
+          ]);
+          break;
+
+        case "permission_resolved":
+          setPendingPermissions((prev) =>
+            prev.filter((request) => request.id !== event.id),
+          );
           break;
 
         case "text_delta":
@@ -117,7 +165,10 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
         case "status":
           setStatus(event.status);
           if (event.status === "running") {
+            optimisticIdsRef.current = [];
             setStreamingText("");
+          } else {
+            setActiveTools([]);
           }
           break;
 
@@ -128,15 +179,36 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
           break;
 
         case "tool_use":
-          setActiveTools((prev) => [
-            ...prev,
-            { tool: event.tool, input: event.input, timestamp: Date.now() },
-          ]);
+          setActiveTools((prev) => {
+            const activity = {
+              id: event.id,
+              tool: event.tool,
+              input: event.input,
+              timestamp: event.timestamp ?? Date.now(),
+            };
+            return activity.id
+              ? [...prev.filter((tool) => tool.id !== activity.id), activity]
+              : [...prev, activity];
+          });
+          break;
+
+        case "active_tools":
+          setActiveTools(event.activeTools);
           break;
 
         case "error":
           setRefreshingTranscript(false);
-          setStatus("error");
+          setTranscriptRefreshError(event.message);
+          if (event.seq === 0) {
+            const rollbackId = optimisticIdsRef.current.pop();
+            if (rollbackId) {
+              setMessages((prev) => prev.filter((message) => message.id !== rollbackId));
+            }
+          }
+          if (event.seq > 0 && !event.nonFatal) {
+            setStatus("error");
+            setActiveTools([]);
+          }
           break;
 
         case "turn_complete":
@@ -170,6 +242,7 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     intentionalClose.current = false;
     reconnectAttempts.current = 0;
     lastSeqRef.current = 0;
+    optimisticIdsRef.current = [];
     setMessages([]);
     setStreamingText("");
     setActiveTools([]);
@@ -178,6 +251,8 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     setSessionName(undefined);
     setRefreshingTranscript(false);
     setTranscriptRefreshError("");
+    setCapabilities(null);
+    setPendingPermissions([]);
 
     connect();
     return () => {
@@ -192,19 +267,29 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
   }, [connect]);
 
   const sendPrompt = useCallback(
-    (text: string) => {
+    (
+      text: string,
+      options: {
+        images?: PromptImageInput[];
+        skills?: PromptSkillInput[];
+        mentions?: PromptMentionInput[];
+      } = {},
+    ) => {
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-      ws.send(JSON.stringify({ type: "send_prompt", content: text }));
+      ws.send(JSON.stringify({ type: "send_prompt", content: text, ...options }));
+      const optimisticContent = buildOptimisticPromptContent(text, options);
+      const optimisticId = crypto.randomUUID();
+      optimisticIdsRef.current.push(optimisticId);
       setMessages((prev) => [
         ...prev,
         {
-          id: crypto.randomUUID(),
+          id: optimisticId,
           sessionId,
           turnId: null,
           role: "user",
-          content: text,
+          content: optimisticContent,
           createdAt: new Date().toISOString(),
         },
       ]);
@@ -233,6 +318,39 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     ws.send(JSON.stringify({ type: "retry" }));
   }, []);
 
+  const retryDesyncedTurn = useCallback((turnId: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "retry_desynced_turn", turnId }));
+  }, []);
+
+  const sendPermissionAction = useCallback((payload: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(payload));
+  }, []);
+
+  const approvePermission = useCallback(
+    (id: string) => sendPermissionAction({ type: "approve_permission", id }),
+    [sendPermissionAction],
+  );
+
+  const approvePermissionForSession = useCallback(
+    (id: string) => sendPermissionAction({ type: "approve_permission_for_session", id }),
+    [sendPermissionAction],
+  );
+
+  const rejectPermission = useCallback(
+    (id: string) => sendPermissionAction({ type: "reject_permission", id }),
+    [sendPermissionAction],
+  );
+
+  const answerUserInput = useCallback(
+    (id: string, answer: string) =>
+      sendPermissionAction({ type: "answer_user_input", id, answer }),
+    [sendPermissionAction],
+  );
+
   return {
     messages,
     streamingText,
@@ -241,10 +359,34 @@ export function useWebSocket(sessionId: string): UseWebSocketResult {
     status,
     sessionName,
     refreshingTranscript,
+    capabilities,
+    pendingPermissions,
     sendPrompt,
     refreshTranscript,
     transcriptRefreshError,
     stop,
     retry,
+    retryDesyncedTurn,
+    approvePermission,
+    approvePermissionForSession,
+    rejectPermission,
+    answerUserInput,
   };
+}
+
+function buildOptimisticPromptContent(
+  text: string,
+  options: {
+    images?: PromptImageInput[];
+    skills?: PromptSkillInput[];
+    mentions?: PromptMentionInput[];
+  },
+): string {
+  const parts = [text.trim()].filter(Boolean);
+  if (options.skills?.length) parts.push(options.skills.map((skill) => `$${skill.name}`).join(" "));
+  if (options.mentions?.length) parts.push(options.mentions.map((mention) => `@${mention.name}`).join(" "));
+  if (options.images?.length) {
+    parts.push(options.images.map((image) => `[image: ${image.name || image.mimeType}]`).join("\n"));
+  }
+  return parts.join("\n").trim() || "Attached structured input";
 }

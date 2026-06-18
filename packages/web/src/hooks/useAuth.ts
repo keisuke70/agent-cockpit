@@ -63,7 +63,7 @@ export function useAuth() {
       // errors must not erase a known token. Keep it and let the user retry.
       setAuthError({
         type: "unreachable",
-        message: "Could not reach Agent Cockpit. Check Tailscale/VPN connectivity and retry.",
+        message: "Could not reach Pocket Agent. Check Tailscale/VPN connectivity and retry.",
       });
     });
 
@@ -90,7 +90,7 @@ export function useAuth() {
       } else {
         setAuthError({
           type: "unreachable",
-          message: "Could not reach Agent Cockpit. Check Tailscale/VPN connectivity and retry.",
+          message: "Could not reach Pocket Agent. Check Tailscale/VPN connectivity and retry.",
         });
       }
       return false;

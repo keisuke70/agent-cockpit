@@ -307,7 +307,7 @@ export function HomePage() {
           gap: 12,
         }}
       >
-        <h1 style={{ fontSize: 18, fontWeight: 650, flexShrink: 0 }}>Agent Cockpit</h1>
+        <h1 style={{ fontSize: 18, fontWeight: 650, flexShrink: 0 }}>Pocket Agent</h1>
         <button
           type="button"
           onClick={() => setShowWorkspaceSettings(true)}

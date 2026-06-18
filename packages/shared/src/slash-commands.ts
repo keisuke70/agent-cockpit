@@ -21,12 +21,12 @@ export interface SlashCommandDefinition {
   supportsInlineArgs?: boolean;
 }
 
-// Mirrors Codex CLI's built-in slash-command catalog, with Agent Cockpit-only
+// Mirrors Codex CLI's built-in slash-command catalog, with Pocket Agent-only
 // aliases kept next to the native command they map to.
 export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   {
     command: "/help",
-    description: "Show supported Agent Cockpit and native Codex slash commands.",
+    description: "Show supported Pocket Agent and native Codex slash commands.",
     aliases: ["/h"],
     category: "information",
     support: "local",
@@ -45,10 +45,11 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
     support: "recognized",
   },
   {
-    command: "/reason",
+    command: "/reasoning",
     description: "Choose reasoning effort.",
+    aliases: ["/reason"],
     category: "configuration",
-    support: "recognized",
+    support: "local",
   },
   {
     command: "/fast",
@@ -66,7 +67,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/permissions",
-    description: "Show current Cockpit permission and sandbox settings.",
+    description: "Show current Pocket Agent permission and sandbox settings.",
     aliases: ["/approval", "/approvals"],
     category: "configuration",
     support: "local",
@@ -145,21 +146,21 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/new",
-    description: "Create a clean Cockpit session in the same repo.",
+    description: "Create a clean Pocket Agent session in the same repo.",
     category: "session",
     support: "local",
     supportsInlineArgs: true,
   },
   {
     command: "/resume",
-    description: "Browse and open saved Cockpit sessions.",
+    description: "Browse and open saved Pocket Agent sessions.",
     category: "session",
     support: "local",
     supportsInlineArgs: true,
   },
   {
     command: "/sessions",
-    description: "Browse saved Cockpit sessions.",
+    description: "Browse saved Pocket Agent sessions.",
     aliases: ["/history"],
     category: "session",
     support: "local",
@@ -186,13 +187,13 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
     command: "/undo",
     description: "Undo the latest turn.",
     category: "session",
-    support: "recognized",
+    support: "codex-app-server",
   },
   {
     command: "/plan",
     description: "Switch to Plan mode.",
     category: "workflow",
-    support: "recognized",
+    support: "codex-app-server",
     supportsInlineArgs: true,
   },
   {
@@ -329,7 +330,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     command: "/clear",
-    description: "Create a clean Cockpit session in the same repo.",
+    description: "Create a clean Pocket Agent session in the same repo.",
     aliases: ["/c"],
     category: "session",
     support: "local",
@@ -339,18 +340,6 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
     command: "/personality",
     description: "Choose a communication style for Codex.",
     category: "configuration",
-    support: "recognized",
-  },
-  {
-    command: "/realtime",
-    description: "Toggle realtime voice mode (experimental).",
-    category: "ui",
-    support: "recognized",
-  },
-  {
-    command: "/settings",
-    description: "Configure realtime microphone/speaker.",
-    category: "ui",
     support: "recognized",
   },
 ];
